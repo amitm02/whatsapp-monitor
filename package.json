@@ -1,0 +1,43 @@
+{
+  "name": "whatsapp-monitor",
+  "version": "1.0.0",
+  "description": "Read-only WhatsApp monitoring tool using Baileys",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "whatsapp-monitor": "./bin/whatsapp-monitor.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node bin/whatsapp-monitor.js",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "whatsapp",
+    "monitor",
+    "baileys",
+    "read-only"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "commander": "^12.1.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.12",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
