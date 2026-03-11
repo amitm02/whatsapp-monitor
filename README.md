@@ -19,7 +19,7 @@ npm install -g whatsapp-monitor
 Or use locally:
 
 ```bash
-git clone https://github.com/yourusername/whatsapp-monitor
+git clone https://github.com/amitm02/whatsapp-monitor
 cd whatsapp-monitor
 npm install
 npm run build
@@ -36,11 +36,10 @@ npm link
 
    Scan the QR code with your WhatsApp app.
 
-2. **List available groups and contacts:**
+2. **List available groups:**
 
    ```bash
    whatsapp-monitor groups
-   whatsapp-monitor contacts
    ```
 
 3. **Add groups/contacts to your allowlist:**
@@ -60,22 +59,21 @@ npm link
 | Command | Description |
 |---------|-------------|
 | `whatsapp-monitor link` | Display QR code to link WhatsApp account |
-| `whatsapp-monitor groups [--full] [-v]` | List all groups with their IDs |
-| `whatsapp-monitor contacts [-v]` | List all contacts with their IDs |
+| `whatsapp-monitor groups [--json] [-v]` | List all groups with their IDs |
 | `whatsapp-monitor config list` | Show current configuration |
 | `whatsapp-monitor config add <id>` | Add group/contact to allowlist |
 | `whatsapp-monitor config remove <id>` | Remove from allowlist |
-| `whatsapp-monitor messages [-f] [--json] [--idle <s>]` | Stream messages from allowed chats (-f to follow) |
+| `whatsapp-monitor messages [-f] [--json] [--idle <s>]` | Stream messages from allowed chats |
 | `whatsapp-monitor events` | Stream raw Baileys events (debugging) |
+| `whatsapp-monitor reset` | Reset authentication state |
 
 ### Options
 
-- `--json` - Output messages as JSON (one per line)
+- `--json` - Output as JSON (one event per line)
 - `-f, --follow` - Keep monitoring indefinitely (for `messages` command)
 - `--idle <seconds>` - Idle timeout before exiting (default: 5, for `messages` command)
-- `--chat <id>` - Filter to a specific chat
-- `--full` - For `groups`: fetch all groups using API (slower but includes participant counts)
-- `-v, --verbose` - Enable debug output (shows sync events, connection state, timing)
+- `--timeout <seconds>` - Safety timeout in seconds (default: 120, for `messages` command)
+- `-v, --verbose` - Enable debug output
 
 ## Configuration
 
@@ -123,11 +121,14 @@ await client.connect()
 - `connect()` - Connect to WhatsApp
 - `disconnect()` - Disconnect cleanly
 - `listGroups()` - Get all available groups
-- `listContacts()` - Get all synced contacts
 - `getGroupMetadata(groupId)` - Get group details
 - `onMessage(callback)` - Subscribe to new messages
+- `onMessageUpdate(callback)` - Subscribe to message edits/status updates
+- `onMessageDelete(callback)` - Subscribe to message deletions
 - `onConnection(callback)` - Subscribe to connection state changes
 - `onQR(callback)` - Subscribe to QR code events
+- `onReady(callback)` - Called when initial sync is complete
+- `onActivity(callback)` - Called on any message activity (for idle timers)
 
 ## Message Format
 
@@ -143,6 +144,7 @@ interface MonitorMessage {
   timestamp: number
   text?: string
   type: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'reaction' | 'poll' | 'location' | 'contact' | 'unknown'
+  upsertType: 'notify' | 'append' | 'unknown'
   isGroup: boolean
   quotedMessage?: {
     id: string
