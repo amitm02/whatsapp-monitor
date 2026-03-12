@@ -15,14 +15,20 @@ export const linkCommand = new Command('link')
 
     client.onConnection((state) => {
       if (state === 'connected') {
-        console.log('\n✓ Successfully connected to WhatsApp!')
-        console.log('Your session has been saved. You can now use other commands.')
-        process.exit(0)
+        console.log('\nConnected! Waiting for sync to complete...')
+        console.log('(Keep WhatsApp open on your phone until this finishes)')
       } else if (state === 'logged_out') {
         console.log('Session expired. Waiting for new QR code...')
       } else if (state === 'disconnected') {
         console.log('Disconnected. Reconnecting...')
       }
+    })
+
+    // Wait for full sync completion before exiting
+    client.onReady(() => {
+      console.log('\n✓ Successfully linked to WhatsApp!')
+      console.log('Your session has been saved. You can now use other commands.')
+      process.exit(0)
     })
 
     await client.connect()

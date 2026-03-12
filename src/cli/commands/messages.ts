@@ -7,6 +7,7 @@ export const messagesCommand = new Command('messages')
   .option('--timeout <seconds>', 'Safety timeout in seconds (default: 120)', '120')
   .option('--idle <seconds>', 'Idle timeout in seconds before exiting (default: 5)', '5')
   .option('-f, --follow', 'Keep monitoring indefinitely')
+  .option('--queued-only', 'Exit immediately after receiving queued messages (no idle timer)')
   .option('-v, --verbose', 'Enable verbose debug output')
   .action(async (options) => {
     const verbose = options.verbose
@@ -27,6 +28,7 @@ export const messagesCommand = new Command('messages')
     }
 
     const follow = options.follow
+    const queuedOnly = options.queuedOnly
     const maxTimeoutSec = parseInt(options.timeout, 10) || 120
     const idleSec = parseInt(options.idle, 10) || 5
 
@@ -75,6 +77,8 @@ export const messagesCommand = new Command('messages')
     if (!options.json) {
       if (follow) {
         console.log('Connecting to WhatsApp...')
+      } else if (queuedOnly) {
+        console.log('Connecting and retrieving queued messages...')
       } else {
         console.log(`Connecting and streaming queued messages (${idleSec}s idle timeout)...`)
       }
@@ -176,9 +180,15 @@ export const messagesCommand = new Command('messages')
     if (!follow) {
       log('Registering onReady callback')
       client.onReady(() => {
-        log('onReady fired, starting idle timer')
+        log('onReady fired')
         ready = true
-        resetIdleTimer()
+        if (queuedOnly) {
+          log('Queued-only mode: exiting immediately')
+          finish()
+        } else {
+          log('Starting idle timer')
+          resetIdleTimer()
+        }
       })
 
       // Safety timeout in case sync never completes

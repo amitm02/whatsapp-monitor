@@ -8,6 +8,8 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import { mkdir } from 'fs/promises'
+import { readFileSync, copyFileSync, existsSync } from 'fs'
+import { join } from 'path'
 import { Boom } from '@hapi/boom'
 import type {
   MonitorConfig,
@@ -35,18 +37,38 @@ import type {
   ActivityCallback,
 } from './types.js'
 import { isAllowed } from './config.js'
+import { createDedupeCache, type DedupeCache } from './dedupe.js'
 
 export interface ClientOptions {
   verbose?: boolean
 }
 
-// Suppress libsignal's "Closing session" console.info spam
+// Store original console methods for libsignal noise suppression
 const originalConsoleInfo = console.info
+const originalConsoleError = console.error
+let suppressLibsignalNoise = true
+
+// Suppress libsignal's "Closing session" console.info spam
 console.info = (...args: unknown[]) => {
-  if (typeof args[0] === 'string' && args[0].includes('Closing session')) {
+  if (suppressLibsignalNoise && typeof args[0] === 'string' && args[0].includes('Closing session')) {
     return
   }
   originalConsoleInfo.apply(console, args)
+}
+
+// Suppress libsignal's "Bad MAC" / "Failed to decrypt" console.error spam
+console.error = (...args: unknown[]) => {
+  if (suppressLibsignalNoise) {
+    const msg = String(args[0])
+    if (msg.includes('Failed to decrypt message') || msg.includes('Session error')) {
+      return
+    }
+  }
+  originalConsoleError.apply(console, args)
+}
+
+export function setLibsignalNoiseSupression(suppress: boolean): void {
+  suppressLibsignalNoise = suppress
 }
 
 export class WhatsAppMonitor {
@@ -68,10 +90,17 @@ export class WhatsAppMonitor {
   private verbose: boolean = false
   private syncResolvers: Array<() => void> = []
   private hasSynced: boolean = false
+  private credsSaveQueue: Promise<void> = Promise.resolve()
+  private reconnectAttempts: number = 0
+  private dedupeCache: DedupeCache
 
   constructor(config: MonitorConfig, options: ClientOptions = {}) {
     this.config = config
     this.verbose = options.verbose ?? false
+    // When verbose, show libsignal noise (Bad MAC errors, etc.)
+    suppressLibsignalNoise = !this.verbose
+    // Initialize dedupe cache (20 minute TTL, max 5000 messages)
+    this.dedupeCache = createDedupeCache({ ttlMs: 20 * 60 * 1000, maxSize: 5000 })
   }
 
   private log(message: string): void {
@@ -80,8 +109,70 @@ export class WhatsAppMonitor {
     }
   }
 
+  private maybeRestoreCredsFromBackup(authDir: string): void {
+    const credsPath = join(authDir, 'creds.json')
+    const backupPath = join(authDir, 'creds.json.bak')
+
+    if (existsSync(credsPath)) {
+      try {
+        const raw = readFileSync(credsPath, 'utf-8')
+        JSON.parse(raw)
+        return // Creds valid, no restore needed
+      } catch {
+        this.log('creds.json is corrupted, attempting restore from backup')
+      }
+    }
+
+    if (existsSync(backupPath)) {
+      try {
+        const backupRaw = readFileSync(backupPath, 'utf-8')
+        JSON.parse(backupRaw) // Validate backup is valid JSON
+        copyFileSync(backupPath, credsPath)
+        this.log('Restored creds.json from backup')
+      } catch {
+        this.log('Backup creds.json.bak is also invalid')
+      }
+    }
+  }
+
+  private backupCreds(authDir: string): void {
+    const credsPath = join(authDir, 'creds.json')
+    const backupPath = join(authDir, 'creds.json.bak')
+
+    try {
+      if (!existsSync(credsPath)) return
+      const raw = readFileSync(credsPath, 'utf-8')
+      JSON.parse(raw) // Validate before backup
+      copyFileSync(credsPath, backupPath)
+    } catch {
+      // Keep existing backup if current creds invalid
+    }
+  }
+
+  private enqueueSaveCreds(saveCreds: () => Promise<void>, authDir: string): void {
+    this.credsSaveQueue = this.credsSaveQueue
+      .then(() => {
+        this.backupCreds(authDir)
+        return saveCreds()
+      })
+      .catch((err) => this.log(`Creds save error: ${err}`))
+  }
+
+  private computeBackoff(): number {
+    const initial = 2000
+    const max = 30000
+    const factor = 1.8
+    const jitter = 0.25
+    const base = initial * Math.pow(factor, this.reconnectAttempts)
+    const jitterMs = base * jitter * Math.random()
+    return Math.min(max, Math.round(base + jitterMs))
+  }
+
   async connect(): Promise<void> {
     await mkdir(this.config.authDir, { recursive: true })
+
+    // Attempt to restore credentials from backup if corrupted
+    this.maybeRestoreCredsFromBackup(this.config.authDir)
 
     const { state, saveCreds } = await useMultiFileAuthState(this.config.authDir)
     const { version } = await fetchLatestBaileysVersion()
@@ -95,14 +186,24 @@ export class WhatsAppMonitor {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
       },
+      browser: ['whatsapp-monitor', 'cli', '1.0.0'],
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
+      markOnlineOnConnect: false,
       shouldSyncHistoryMessage: () => true,
     })
 
-    this.socket.ev.on('creds.update', saveCreds)
+    // Add WebSocket error handler to prevent crashes
+    if (this.socket.ws && typeof (this.socket.ws as unknown as { on?: Function }).on === 'function') {
+      (this.socket.ws as unknown as { on: Function }).on('error', (err: Error) => {
+        this.log(`WebSocket error: ${err.message}`)
+      })
+    }
+
+    // Use queued credential saving to prevent corruption from concurrent saves
+    this.socket.ev.on('creds.update', () => this.enqueueSaveCreds(saveCreds, this.config.authDir))
 
 
     this.socket.ev.on('connection.update', (update) => {
@@ -150,10 +251,26 @@ export class WhatsAppMonitor {
         }
 
         if (shouldReconnect) {
-          setTimeout(() => this.connect(), 3000)
+          this.reconnectAttempts++
+          const backoffMs = this.computeBackoff()
+          this.log(`Reconnecting in ${backoffMs}ms (attempt ${this.reconnectAttempts})`)
+          setTimeout(() => this.connect(), backoffMs)
         }
       } else if (connection === 'open') {
+        this.reconnectAttempts = 0 // Reset on successful connection
         this.setConnectionState('connected')
+
+        // Fallback: if no sync events within 5 seconds, consider ready
+        // This handles reconnection cases where Baileys skips sync
+        setTimeout(() => {
+          if (!this.hasSynced) {
+            this.log('connection.update: no sync events received, marking ready')
+            this.hasSynced = true
+            this.syncResolvers.forEach((resolve) => resolve())
+            this.syncResolvers = []
+            this.readyCallbacks.forEach((cb) => cb())
+          }
+        }, 5000)
       }
     })
 
@@ -163,7 +280,8 @@ export class WhatsAppMonitor {
 
       for (const msg of messages) {
         const chatId = msg.key.remoteJid
-        if (!chatId) continue
+        const messageId = msg.key.id
+        if (!chatId || !messageId) continue
 
         // Update contact pushName from incoming messages
         const senderId = msg.key.participant || chatId
@@ -179,6 +297,14 @@ export class WhatsAppMonitor {
         // Filter based on allowlist
         if (!isAllowed(chatId, this.config)) continue
 
+        // Dedupe check: skip if we've seen this message recently
+        // (placed after allowlist to avoid caching messages we don't care about)
+        const dedupeKey = `${chatId}:${messageId}`
+        if (this.dedupeCache.check(dedupeKey)) {
+          this.log(`Skipping duplicate message: ${dedupeKey}`)
+          continue
+        }
+
         const upsertType = type === 'notify' || type === 'append' ? type : 'unknown'
         const monitorMsg = await this.parseMessage(msg, upsertType)
         if (monitorMsg) {
@@ -193,6 +319,7 @@ export class WhatsAppMonitor {
         const chatId = update.key?.remoteJid
         const messageId = update.key?.id
         if (!chatId || !messageId) continue
+        if (!isAllowed(chatId, this.config)) continue
 
         const statusLabels: Record<number, string> = {
           0: 'error',
@@ -233,6 +360,7 @@ export class WhatsAppMonitor {
           const chatId = key.remoteJid
           const messageId = key.id
           if (!chatId || !messageId) continue
+          if (!isAllowed(chatId, this.config)) continue
           if (!grouped.has(chatId)) {
             grouped.set(chatId, [])
           }
@@ -248,8 +376,10 @@ export class WhatsAppMonitor {
         }
       } else if ('jid' in data && 'all' in data) {
         // Clear chat: { jid: string, all: true }
+        const chatId = (data as { jid: string }).jid
+        if (!isAllowed(chatId, this.config)) return
         const deleteData: MessageDeleteData = {
-          chatId: (data as { jid: string }).jid,
+          chatId,
           messageIds: [],
           isRevoke: false,
         }
@@ -361,11 +491,16 @@ export class WhatsAppMonitor {
       }
       this.historySyncCallbacks.forEach((cb) => cb(syncData))
 
-      // Notify sync waiters (if not already notified by isOnline)
+      // Notify sync waiters and fire ready callbacks (if not already done by isOnline)
       if (!this.hasSynced) {
+        this.log('messaging-history.set: sync completed')
         this.hasSynced = true
         this.syncResolvers.forEach((resolve) => resolve())
         this.syncResolvers = []
+
+        // Fire ready callbacks
+        this.log('messaging-history.set: firing ready callbacks')
+        this.readyCallbacks.forEach((cb) => cb())
       }
 
     })
