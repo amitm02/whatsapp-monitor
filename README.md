@@ -16,7 +16,7 @@ A **read-only** WhatsApp monitoring tool using Baileys. Designed to be secure by
 npm install -g whatsapp-monitor
 ```
 
-Or use locally:
+Or build from source:
 
 ```bash
 git clone https://github.com/amitm02/whatsapp-monitor
@@ -25,6 +25,10 @@ npm install
 npm run build
 npm link
 ```
+
+### Requirements
+
+- Node.js >= 18.0.0
 
 ## Quick Start
 
@@ -59,21 +63,46 @@ npm link
 | Command | Description |
 |---------|-------------|
 | `whatsapp-monitor link` | Display QR code to link WhatsApp account |
-| `whatsapp-monitor groups [--json] [-v]` | List all groups with their IDs |
+| `whatsapp-monitor groups` | List all groups with their IDs |
 | `whatsapp-monitor config list` | Show current configuration |
 | `whatsapp-monitor config add <id>` | Add group/contact to allowlist |
 | `whatsapp-monitor config remove <id>` | Remove from allowlist |
-| `whatsapp-monitor messages [-f] [--json] [--idle <s>]` | Stream messages from allowed chats |
+| `whatsapp-monitor messages` | Stream messages from allowed chats |
 | `whatsapp-monitor events` | Stream raw Baileys events (debugging) |
 | `whatsapp-monitor reset` | Reset authentication state |
 
-### Options
+### Messages Command Options
 
-- `--json` - Output as JSON (one event per line)
-- `-f, --follow` - Keep monitoring indefinitely (for `messages` command)
-- `--idle <seconds>` - Idle timeout before exiting (default: 5, for `messages` command)
-- `--timeout <seconds>` - Safety timeout in seconds (default: 120, for `messages` command)
-- `-v, --verbose` - Enable debug output
+| Option | Description |
+|--------|-------------|
+| `-f, --follow` | Keep monitoring indefinitely |
+| `-a, --all` | Show all messages without filtering by allowlist |
+| `--json` | Output as JSON (one event per line) |
+| `--idle <seconds>` | Idle timeout before exiting (default: 5) |
+| `--timeout <seconds>` | Safety timeout in seconds (default: 120) |
+| `--queued-only` | Exit immediately after receiving queued messages |
+| `-v, --verbose` | Enable verbose debug output |
+
+### Events Command Options
+
+| Option | Description |
+|--------|-------------|
+| `--timeout <seconds>` | Max timeout in seconds (default: 60) |
+| `--idle <seconds>` | Exit after N seconds of no events (default: 10) |
+| `-v, --verbose` | Enable debug output |
+
+### Groups Command Options
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Output as JSON |
+| `-v, --verbose` | Enable debug output |
+
+### Reset Command Options
+
+| Option | Description |
+|--------|-------------|
+| `-y, --yes` | Skip confirmation prompt |
 
 ## Configuration
 
@@ -129,6 +158,34 @@ await client.connect()
 - `onQR(callback)` - Subscribe to QR code events
 - `onReady(callback)` - Called when initial sync is complete
 - `onActivity(callback)` - Called on any message activity (for idle timers)
+
+## Understanding Queued Messages
+
+When you run `whatsapp-monitor messages` (without `-f`), the tool retrieves **queued messages** that accumulated while the client was offline. It's important to understand how WhatsApp handles these messages:
+
+### How It Works
+
+WhatsApp uses a **multi-device architecture** where your linked devices (including this monitor) can receive messages even when your phone is offline. When you connect:
+
+1. WhatsApp syncs messages that arrived while you were disconnected
+2. These arrive as "queued" messages (marked with `[queued]` in output, or `upsertType: "append"` in JSON)
+3. New real-time messages arrive as "notify" type
+
+### Important Limitations
+
+**No guarantee of completeness**: WhatsApp does not guarantee that all messages will be delivered to linked devices. Messages may be missing due to:
+
+- **Sync limitations**: WhatsApp prioritizes recent messages; older ones may not sync
+- **Connection timing**: Messages arriving during reconnection may be dropped
+- **Server-side retention**: WhatsApp doesn't store messages indefinitely on their servers
+- **14-day inactivity**: If your primary phone is offline for 14+ days, linked devices are logged out
+
+**Best practices**:
+
+- Use `-f` (follow mode) for continuous real-time monitoring when possible
+- Don't rely solely on queued messages for critical message capture
+- Run the monitor frequently to minimize gaps in message history
+- Consider the queued messages feature as "best effort" rather than guaranteed delivery
 
 ## Message Format
 
