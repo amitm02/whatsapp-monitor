@@ -740,6 +740,7 @@ export class WhatsAppMonitor {
       upsertType,
       isGroup,
       quotedMessage,
+      rawMessage: msg.message,
     }
   }
 

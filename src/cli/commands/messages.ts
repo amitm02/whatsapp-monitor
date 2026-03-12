@@ -126,6 +126,9 @@ export const messagesCommand = new Command('messages')
         if (msg.quotedMessage) {
           console.log(`  ↳ Replying to: ${msg.quotedMessage.text || '(media)'}`)
         }
+        if (options.verbose && msg.rawMessage) {
+          console.log(`Raw: ${JSON.stringify(msg.rawMessage)}`)
+        }
         console.log('─'.repeat(80))
       }
     })

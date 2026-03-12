@@ -45,6 +45,7 @@ export interface MonitorMessage {
   upsertType: 'notify' | 'append' | 'unknown'
   isGroup: boolean
   quotedMessage?: QuotedMessage
+  rawMessage?: unknown
 }
 
 export interface QuotedMessage {
