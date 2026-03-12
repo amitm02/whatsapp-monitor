@@ -8,6 +8,13 @@ allowed-tools: Bash(whatsapp-monitor *)
 
 Read-only access to WhatsApp messages from pre-configured allowed chats.
 
+> **Note for OpenClaw agents**: This skill is **not** the same as the WhatsApp channel used to communicate with the AI agent. This is a separate tool for monitoring external WhatsApp chats (e.g., the user's personal WhatsApp groups). It has its own independent authentication and linking process. For example, if OpenClaw has its own WhatsApp number for user communication, you can still use this skill to monitor specific groups on the user's personal WhatsApp account.
+>
+> Why use this instead of the OpenClaw WhatsApp channel?
+> 1. **Different purpose**: The channel is for messaging the AI, not monitoring external chats
+> 2. **Silent read-only access**: This tool provides proper read-only monitoring without presence indicators
+> 3. **Safety**: The CLI has no send capability, significantly reducing the risk of the agent accidentally sending messages to monitored chats
+
 ## Installation
 
 ```bash
@@ -26,7 +33,27 @@ yarn global add whatsapp-monitor
 
 ## First-Time Setup (Required)
 
-Before using any commands, the user must link their WhatsApp account. This is a **one-time interactive process** that requires the user to scan a QR code with their phone.
+Before using any commands, the user must link their WhatsApp account. This is a **one-time interactive process** that requires user involvement.
+
+### For AI Agent Use (Recommended)
+
+Use pairing code authentication - the agent displays a code that the user enters manually:
+
+```bash
+whatsapp-monitor link --phone <phone-number>
+```
+
+The phone number must be in E.164 format without the + sign (e.g., `12345678901` for US number +1-234-567-8901).
+
+The agent will display an 8-digit pairing code. The user must:
+1. Open WhatsApp on their phone
+2. Go to Settings → Linked Devices → Link a Device
+3. Tap "Link with phone number instead"
+4. Enter the pairing code displayed by the agent
+
+### For Manual Use (QR Code)
+
+Use QR code authentication when running interactively:
 
 ```bash
 whatsapp-monitor link
@@ -37,9 +64,9 @@ This will display a QR code in the terminal. The user must:
 2. Go to Settings → Linked Devices → Link a Device
 3. Scan the QR code displayed in the terminal
 
-**The agent cannot complete this step automatically** - it requires user interaction. Once linked, the session is saved and subsequent commands will work without re-linking.
+**Either method requires user interaction** - the agent cannot complete linking automatically. Once linked, the session is saved and subsequent commands will work without re-linking.
 
-To check if already linked, run any command (e.g., `whatsapp-monitor groups`). If it connects successfully, the account is linked. If it shows a QR code, the user needs to scan it.
+To check if already linked, run any command (e.g., `whatsapp-monitor groups`). If it connects successfully, the account is linked. If it shows a QR code or pairing code prompt, the user needs to complete the linking process.
 
 ## Configuring the Allowlist
 
@@ -98,11 +125,15 @@ whatsapp-monitor config remove <id>       # Remove from allowlist
 ```
 
 ### link
-Display QR code to link WhatsApp account (interactive, requires user to scan).
+Link WhatsApp account via QR code or pairing code (interactive, requires user involvement).
 
 ```bash
-whatsapp-monitor link
+whatsapp-monitor link [options]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--phone <number>` | Use pairing code instead of QR (E.164 format without +, e.g., 12345678901) |
 
 ### reset
 Reset authentication state (requires re-linking).

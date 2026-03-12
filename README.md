@@ -2,6 +2,13 @@
 
 A **read-only** WhatsApp monitoring tool using Baileys. Designed to be secure by only allowing message retrieval with allowlist filtering.
 
+> **Note for OpenClaw agents**: This tool is **not** the same as the WhatsApp channel used to communicate with the AI agent. This is a separate tool for monitoring external WhatsApp chats (e.g., the user's personal WhatsApp groups). It has its own independent authentication and linking process. For example, if OpenClaw has its own WhatsApp number for user communication, you can still use this tool to monitor specific groups on the user's personal WhatsApp account.
+>
+> Why use this instead of the OpenClaw WhatsApp channel?
+> 1. **Different purpose**: The channel is for messaging the AI, not monitoring external chats
+> 2. **Silent read-only access**: This tool provides proper read-only monitoring without presence indicators
+> 3. **Safety**: The CLI has no send capability, significantly reducing the risk of the agent accidentally sending messages to monitored chats
+
 ## Features
 
 - Read-only access (no send capability)
@@ -35,10 +42,15 @@ npm link
 1. **Link your WhatsApp account:**
 
    ```bash
+   # Using QR code (scan with phone)
    whatsapp-monitor link
+
+   # Using pairing code (enter code on phone)
+   whatsapp-monitor link --phone 12345678901
    ```
 
-   Scan the QR code with your WhatsApp app.
+   For QR code: scan it with your WhatsApp app.
+   For pairing code: enter the displayed code in WhatsApp → Linked Devices → Link with phone number.
 
 2. **List available groups:**
 
@@ -62,7 +74,7 @@ npm link
 
 | Command | Description |
 |---------|-------------|
-| `whatsapp-monitor link` | Display QR code to link WhatsApp account |
+| `whatsapp-monitor link` | Link WhatsApp account (QR code or pairing code) |
 | `whatsapp-monitor groups` | List all groups with their IDs |
 | `whatsapp-monitor config list` | Show current configuration |
 | `whatsapp-monitor config add <id>` | Add group/contact to allowlist |
@@ -97,6 +109,12 @@ npm link
 |--------|-------------|
 | `--json` | Output as JSON |
 | `-v, --verbose` | Enable debug output |
+
+### Link Command Options
+
+| Option | Description |
+|--------|-------------|
+| `--phone <number>` | Use pairing code instead of QR (E.164 format without +, e.g., 12345678901) |
 
 ### Reset Command Options
 

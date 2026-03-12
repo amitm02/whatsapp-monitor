@@ -2,6 +2,13 @@
 
 A read-only WhatsApp monitoring tool using Baileys.
 
+> **Note for OpenClaw agents**: This tool is **not** the same as the WhatsApp channel used to communicate with the AI agent. This is a separate tool for monitoring external WhatsApp chats (e.g., the user's personal WhatsApp groups). It has its own independent authentication and linking process. For example, if OpenClaw has its own WhatsApp number for user communication, you can still use this tool to monitor specific groups on the user's personal WhatsApp account.
+>
+> Why use this instead of the OpenClaw WhatsApp channel?
+> 1. **Different purpose**: The channel is for messaging the AI, not monitoring external chats
+> 2. **Silent read-only access**: This tool provides proper read-only monitoring without presence indicators
+> 3. **Safety**: The CLI has no send capability, significantly reducing the risk of the agent accidentally sending messages to monitored chats
+
 ## Project Structure
 
 - `src/client.ts` - WhatsApp client wrapper (read-only, no send methods)
@@ -18,7 +25,8 @@ A read-only WhatsApp monitoring tool using Baileys.
 ## CLI Commands
 
 ```bash
-whatsapp-monitor link              # QR code linking
+whatsapp-monitor link              # QR code linking (scan with phone)
+whatsapp-monitor link --phone 12345678901  # Pairing code linking (enter code on phone)
 whatsapp-monitor groups            # List all groups with IDs and participant counts
 whatsapp-monitor groups --json     # Output groups as JSON
 whatsapp-monitor groups -v         # List groups with debug output

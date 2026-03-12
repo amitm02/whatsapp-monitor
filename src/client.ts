@@ -530,6 +530,13 @@ export class WhatsAppMonitor {
     }
   }
 
+  async requestPairingCode(phoneNumber: string): Promise<string> {
+    if (!this.socket) {
+      throw new Error('Not connected')
+    }
+    return await this.socket.requestPairingCode(phoneNumber)
+  }
+
   async listGroups(): Promise<GroupInfo[]> {
     if (!this.socket) {
       throw new Error('Not connected')
