@@ -99,6 +99,19 @@ There is no direct way to list contact IDs from WhatsApp. To get a contact's ID:
 3. Find the contact's ID from the message output (format: `1234567890@s.whatsapp.net`)
 4. Add the contact with `whatsapp-monitor config add <contact-id>`
 
+## Periodic Monitoring
+
+Once the allowlist is configured, the agent can periodically check for new messages and notify the user about important updates. For example, the user can ask the agent to:
+
+- Check for new messages every few hours
+- Summarize important messages from specific groups
+- Alert when certain keywords or topics are mentioned
+- Provide daily digests of monitored chats
+
+Example prompt: *"Check my WhatsApp groups every 3 hours and let me know if there's anything important."*
+
+The agent will run `whatsapp-monitor messages` to fetch recent messages and analyze them based on the user's criteria.
+
 ## Commands Reference
 
 ### messages
