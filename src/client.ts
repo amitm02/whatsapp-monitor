@@ -44,11 +44,19 @@ export interface ClientOptions {
 }
 
 // Store original console methods for libsignal noise suppression
+const originalConsoleLog = console.log
 const originalConsoleInfo = console.info
 const originalConsoleError = console.error
 let suppressLibsignalNoise = true
 
-// Suppress libsignal's "Closing session" console.info spam
+// Suppress libsignal's "Closing session" spam (can come via console.log or console.info)
+console.log = (...args: unknown[]) => {
+  if (suppressLibsignalNoise && typeof args[0] === 'string' && args[0].includes('Closing session')) {
+    return
+  }
+  originalConsoleLog.apply(console, args)
+}
+
 console.info = (...args: unknown[]) => {
   if (suppressLibsignalNoise && typeof args[0] === 'string' && args[0].includes('Closing session')) {
     return
