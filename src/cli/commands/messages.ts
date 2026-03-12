@@ -8,6 +8,7 @@ export const messagesCommand = new Command('messages')
   .option('--idle <seconds>', 'Idle timeout in seconds before exiting (default: 5)', '5')
   .option('-f, --follow', 'Keep monitoring indefinitely')
   .option('--queued-only', 'Exit immediately after receiving queued messages (no idle timer)')
+  .option('-a, --all', 'Show all messages without filtering by allowlist')
   .option('-v, --verbose', 'Enable verbose debug output')
   .action(async (options) => {
     const verbose = options.verbose
@@ -17,10 +18,11 @@ export const messagesCommand = new Command('messages')
       }
     }
 
-    const { client, config } = await createClient({ verbose })
+    const showAll = options.all
+    const { client, config } = await createClient({ verbose, skipAllowlist: showAll })
 
-    // Check if there are any allowed chats
-    if (config.allowedGroups.length === 0 && config.allowedContacts.length === 0) {
+    // Check if there are any allowed chats (unless --all is used)
+    if (!showAll && config.allowedGroups.length === 0 && config.allowedContacts.length === 0) {
       console.error(
         'No chats in allowlist. Add chats using: whatsapp-monitor config add <id>'
       )
@@ -87,15 +89,23 @@ export const messagesCommand = new Command('messages')
     client.onConnection((state) => {
       log(`Connection state changed: ${state}`)
       if (state === 'connected') {
-        if (!options.json && follow) {
-          console.log('\n✓ Connected! Monitoring messages from:')
-          for (const id of config.allowedGroups) {
-            console.log(`  - ${id}`)
+        if (!options.json) {
+          if (showAll) {
+            console.log('\n✓ Connected! Monitoring ALL messages (no filtering)')
+          } else {
+            console.log('\n✓ Connected! Monitoring messages from:')
+            for (const id of config.allowedGroups) {
+              console.log(`  - ${id}`)
+            }
+            for (const id of config.allowedContacts) {
+              console.log(`  - ${id}`)
+            }
           }
-          for (const id of config.allowedContacts) {
-            console.log(`  - ${id}`)
+          if (follow) {
+            console.log('\nPress Ctrl+C to stop\n')
+          } else {
+            console.log('')
           }
-          console.log('\nPress Ctrl+C to stop\n')
           console.log('─'.repeat(80))
         }
       } else if (state === 'disconnected') {

@@ -41,6 +41,7 @@ import { createDedupeCache, type DedupeCache } from './dedupe.js'
 
 export interface ClientOptions {
   verbose?: boolean
+  skipAllowlist?: boolean
 }
 
 // Store original console methods for libsignal noise suppression
@@ -96,6 +97,7 @@ export class WhatsAppMonitor {
   private connectionState: ConnectionState = 'disconnected'
   private contacts: Map<string, ContactInfo> = new Map()
   private verbose: boolean = false
+  private skipAllowlist: boolean = false
   private syncResolvers: Array<() => void> = []
   private hasSynced: boolean = false
   private credsSaveQueue: Promise<void> = Promise.resolve()
@@ -105,6 +107,7 @@ export class WhatsAppMonitor {
   constructor(config: MonitorConfig, options: ClientOptions = {}) {
     this.config = config
     this.verbose = options.verbose ?? false
+    this.skipAllowlist = options.skipAllowlist ?? false
     // When verbose, show libsignal noise (Bad MAC errors, etc.)
     suppressLibsignalNoise = !this.verbose
     // Initialize dedupe cache (20 minute TTL, max 5000 messages)
@@ -115,6 +118,11 @@ export class WhatsAppMonitor {
     if (this.verbose) {
       console.error(`[DEBUG] ${new Date().toISOString()} - ${message}`)
     }
+  }
+
+  private shouldFilter(chatId: string): boolean {
+    if (this.skipAllowlist) return false
+    return !isAllowed(chatId, this.config)
   }
 
   private maybeRestoreCredsFromBackup(authDir: string): void {
@@ -302,8 +310,8 @@ export class WhatsAppMonitor {
           }
         }
 
-        // Filter based on allowlist
-        if (!isAllowed(chatId, this.config)) continue
+        // Filter based on allowlist (unless skipAllowlist is set)
+        if (this.shouldFilter(chatId)) continue
 
         // Dedupe check: skip if we've seen this message recently
         // (placed after allowlist to avoid caching messages we don't care about)
@@ -327,7 +335,7 @@ export class WhatsAppMonitor {
         const chatId = update.key?.remoteJid
         const messageId = update.key?.id
         if (!chatId || !messageId) continue
-        if (!isAllowed(chatId, this.config)) continue
+        if (this.shouldFilter(chatId)) continue
 
         const statusLabels: Record<number, string> = {
           0: 'error',
@@ -368,7 +376,7 @@ export class WhatsAppMonitor {
           const chatId = key.remoteJid
           const messageId = key.id
           if (!chatId || !messageId) continue
-          if (!isAllowed(chatId, this.config)) continue
+          if (this.shouldFilter(chatId)) continue
           if (!grouped.has(chatId)) {
             grouped.set(chatId, [])
           }
@@ -385,7 +393,7 @@ export class WhatsAppMonitor {
       } else if ('jid' in data && 'all' in data) {
         // Clear chat: { jid: string, all: true }
         const chatId = (data as { jid: string }).jid
-        if (!isAllowed(chatId, this.config)) return
+        if (this.shouldFilter(chatId)) return
         const deleteData: MessageDeleteData = {
           chatId,
           messageIds: [],
@@ -748,7 +756,7 @@ export class WhatsAppMonitor {
       upsertType,
       isGroup,
       quotedMessage,
-      rawMessage: msg.message,
+      rawMessage: msg,
     }
   }
 
