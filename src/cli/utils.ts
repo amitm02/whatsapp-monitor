@@ -2,9 +2,9 @@ import { WhatsAppMonitor } from '../client.js'
 import { loadConfig, type MonitorConfig } from '../index.js'
 import qrcode from 'qrcode-terminal'
 
-export async function createClient(options: { verbose?: boolean; skipAllowlist?: boolean } = {}): Promise<{ client: WhatsAppMonitor; config: MonitorConfig }> {
+export async function createClient(options: { verbose?: boolean; skipAllowlist?: boolean; browserName?: string } = {}): Promise<{ client: WhatsAppMonitor; config: MonitorConfig }> {
   const config = await loadConfig()
-  const client = new WhatsAppMonitor(config, { verbose: options.verbose, skipAllowlist: options.skipAllowlist })
+  const client = new WhatsAppMonitor(config, { verbose: options.verbose, skipAllowlist: options.skipAllowlist, browserName: options.browserName })
   return { client, config }
 }
 

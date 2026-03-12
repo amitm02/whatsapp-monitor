@@ -42,6 +42,7 @@ import { createDedupeCache, type DedupeCache } from './dedupe.js'
 export interface ClientOptions {
   verbose?: boolean
   skipAllowlist?: boolean
+  browserName?: string
 }
 
 // Store original console methods for libsignal noise suppression
@@ -103,11 +104,13 @@ export class WhatsAppMonitor {
   private credsSaveQueue: Promise<void> = Promise.resolve()
   private reconnectAttempts: number = 0
   private dedupeCache: DedupeCache
+  private browserName: string
 
   constructor(config: MonitorConfig, options: ClientOptions = {}) {
     this.config = config
     this.verbose = options.verbose ?? false
     this.skipAllowlist = options.skipAllowlist ?? false
+    this.browserName = options.browserName ?? 'whatsapp-monitor'
     // When verbose, show libsignal noise (Bad MAC errors, etc.)
     suppressLibsignalNoise = !this.verbose
     // Initialize dedupe cache (20 minute TTL, max 5000 messages)
@@ -202,9 +205,9 @@ export class WhatsAppMonitor {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
       },
-      browser: ['whatsapp-monitor', 'cli', '1.0.0'],
+      browser: [this.browserName, 'Chrome', '120.0.0'],
       printQRInTerminal: false,
-      logger: pino({ level: 'silent' }),
+      logger: pino({ level: this.verbose ? 'debug' : 'silent' }),
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
       markOnlineOnConnect: false,

@@ -33,40 +33,55 @@ yarn global add whatsapp-monitor
 
 ## First-Time Setup (Required)
 
-Before using any commands, the user must link their WhatsApp account. This is a **one-time interactive process** that requires user involvement.
+Before using any commands, the user must link their WhatsApp account. This is a **one-time interactive process** that requires the user to run the command themselves.
 
-### For AI Agent Use (Recommended)
+> **Important**: The linking process cannot be performed automatically by the agent. Due to WebSocket connection requirements, the `link` command must be run directly by the user in their terminal (via SSH or local shell). The agent should guide the user through the process but cannot execute the link command on their behalf.
 
-Use pairing code authentication - the agent displays a code that the user enters manually:
+### Linking Process (User Must Run)
 
+The user must run the link command directly in the environment where `whatsapp-monitor` is installed (e.g., via SSH to the server running OpenClaw). The agent should provide the exact command and guide the user through the process:
+
+**Recommended: QR Code Method**
 ```bash
-whatsapp-monitor link --phone <phone-number>
+whatsapp-monitor link --name "<descriptive-name>"
 ```
 
-The phone number must be in E.164 format without the + sign (e.g., `12345678901` for US number +1-234-567-8901).
+For example:
+```bash
+whatsapp-monitor link --name "Family Group Monitor"
+```
 
-The agent will display an 8-digit pairing code. The user must:
+This will display a QR code in the terminal. Instruct the user to:
+1. Open WhatsApp on their phone
+2. Go to Settings → Linked Devices → Link a Device
+3. Scan the QR code displayed in their terminal
+
+**Alternative: Pairing Code Method**
+```bash
+whatsapp-monitor link --code --phone <phone-number> --name "<descriptive-name>"
+```
+
+For example (phone number in E.164 format without +):
+```bash
+whatsapp-monitor link --code --phone 12345678901 --name "Work Chat Monitor"
+```
+
+This displays a pairing code. The user should:
 1. Open WhatsApp on their phone
 2. Go to Settings → Linked Devices → Link a Device
 3. Tap "Link with phone number instead"
-4. Enter the pairing code displayed by the agent
+4. Enter the pairing code shown in the terminal
 
-### For Manual Use (QR Code)
+**Note:** The `--name` parameter sets the device name visible in WhatsApp's Linked Devices list. Choose a name that helps the user identify what this linked device is used for.
 
-Use QR code authentication when running interactively:
+### Checking Link Status
 
+Once linked, the session is saved and subsequent commands will work without re-linking. To check if already linked, run:
 ```bash
-whatsapp-monitor link
+whatsapp-monitor groups
 ```
 
-This will display a QR code in the terminal. The user must:
-1. Open WhatsApp on their phone
-2. Go to Settings → Linked Devices → Link a Device
-3. Scan the QR code displayed in the terminal
-
-**Either method requires user interaction** - the agent cannot complete linking automatically. Once linked, the session is saved and subsequent commands will work without re-linking.
-
-To check if already linked, run any command (e.g., `whatsapp-monitor groups`). If it connects successfully, the account is linked. If it shows a QR code or pairing code prompt, the user needs to complete the linking process.
+If it connects successfully and lists groups, the account is linked. If it shows a QR code or pairing code prompt, the user needs to complete the linking process.
 
 ## Configuring the Allowlist
 
@@ -125,7 +140,7 @@ whatsapp-monitor config remove <id>       # Remove from allowlist
 ```
 
 ### link
-Link WhatsApp account via QR code or pairing code (interactive, requires user involvement).
+Link WhatsApp account. Default mode is QR code.
 
 ```bash
 whatsapp-monitor link [options]
@@ -133,7 +148,11 @@ whatsapp-monitor link [options]
 
 | Option | Description |
 |--------|-------------|
-| `--phone <number>` | Use pairing code instead of QR (E.164 format without +, e.g., 12345678901) |
+| `--qr` | Link via QR code (default) |
+| `--code` | Link via pairing code (for agent use) |
+| `--phone <number>` | Phone number in E.164 format without + (required with --code) |
+| `--name <name>` | Device name shown in WhatsApp (default: whatsapp-monitor) |
+| `--reset` | Reset existing auth before linking |
 
 ### reset
 Reset authentication state (requires re-linking).
