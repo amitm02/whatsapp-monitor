@@ -182,6 +182,8 @@ whatsapp-monitor reset [options]
 
 When running `messages` without `-f`, the tool retrieves messages that accumulated while offline. **Important**: WhatsApp does not guarantee all offline messages will be delivered. Messages may be missing due to sync limitations, connection timing, or server-side retention limits.
 
+**Note**: After initial linking, some queued messages may fail to decrypt (this is normal due to how WhatsApp's end-to-end encryption works with newly linked devices). Newer messages received after linking are expected to decrypt properly.
+
 ## Security Notes
 - Only messages from chats in the allowlist are returned (unless `-a` is used)
 - This is read-only - no message sending capability
