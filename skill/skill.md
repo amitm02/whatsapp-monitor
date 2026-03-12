@@ -41,6 +41,22 @@ This will display a QR code in the terminal. The user must:
 
 To check if already linked, run any command (e.g., `whatsapp-monitor groups`). If it connects successfully, the account is linked. If it shows a QR code, the user needs to scan it.
 
+## Configuring the Allowlist
+
+After linking, ask the user which groups or contacts they want to monitor.
+
+### Adding Groups
+1. Run `whatsapp-monitor groups` to list all available groups with their IDs
+2. Ask the user which groups they want to monitor
+3. Add each group with `whatsapp-monitor config add <group-id>`
+
+### Adding Contacts (DMs)
+There is no direct way to list contact IDs from WhatsApp. To get a contact's ID:
+1. Ask the user to have that person send them a message
+2. Run `whatsapp-monitor messages -a` to see all messages (bypassing allowlist)
+3. Find the contact's ID from the message output (format: `1234567890@s.whatsapp.net`)
+4. Add the contact with `whatsapp-monitor config add <contact-id>`
+
 ## Commands Reference
 
 ### messages
