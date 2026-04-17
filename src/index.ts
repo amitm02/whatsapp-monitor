@@ -7,7 +7,8 @@ export {
   isAllowed,
   getConfigPath,
   getConfigDir,
-  resolveNotifyDefaults,
+  resolveNotify,
+  NotifyConfigError,
   CONFIG_DIR,
   CONFIG_FILE,
   DEFAULT_AUTH_DIR,
@@ -16,6 +17,7 @@ export {
 export type {
   MonitorConfig,
   NotifyConfig,
+  ResolvedNotify,
   NotificationPayload,
   GroupInfo,
   ContactInfo,

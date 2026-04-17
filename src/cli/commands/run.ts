@@ -1,13 +1,13 @@
 import { Command } from 'commander'
 import { createClient } from '../utils.js'
 import { Notifier } from '../../notifier.js'
-import { Dispatcher } from '../../dispatcher.js'
-import { resolveNotifyDefaults } from '../../config.js'
+import { Dispatcher, type DispatchResult } from '../../dispatcher.js'
+import { resolveNotify } from '../../config.js'
 
 export const runCommand = new Command('run')
   .description('Run as a persistent listener. Streams messages from allowed chats and invokes notify.command (if configured).')
   .option('-v, --verbose', 'Enable verbose debug output')
-  .option('--no-notify', 'Skip notify.command; still append to the JSONL log')
+  .option('--no-notify', 'Skip notify command; still append to the JSONL log')
   .action(async (options) => {
     const verbose = Boolean(options.verbose)
     const logInfo = (msg: string) => console.error(`[${new Date().toISOString()}] ${msg}`)
@@ -22,32 +22,55 @@ export const runCommand = new Command('run')
       process.exit(1)
     }
 
-    const notifyResolved = resolveNotifyDefaults(config.notify)
-    const effectiveCommand = options.notify === false ? '' : notifyResolved.command
+    const baseResolved = resolveNotify(config.notify)
+    const notifyResolved: ReturnType<typeof resolveNotify> =
+      options.notify === false && baseResolved.mode !== 'disabled'
+        ? {
+            mode: 'disabled',
+            quietPeriodSec: baseResolved.quietPeriodSec,
+            timeoutSec: baseResolved.timeoutSec,
+            logFile: baseResolved.logFile,
+            maxBufferedPerChat: baseResolved.maxBufferedPerChat,
+          }
+        : baseResolved
 
-    if (!effectiveCommand) {
+    if (notifyResolved.mode === 'disabled') {
       logInfo(
         options.notify === false
-          ? 'notify.command disabled via --no-notify; notifications will only be written to the JSONL log.'
-          : 'No notify.command configured; notifications will only be written to the JSONL log.'
+          ? 'notify disabled via --no-notify; notifications will only be written to the JSONL log.'
+          : 'no notify configured; notifications will only be written to the JSONL log.'
       )
+    } else if (notifyResolved.mode === 'openclaw-agent') {
+      logInfo(`notify mode: openclaw-agent (agent=${notifyResolved.agent}, sessionIdTemplate=${notifyResolved.sessionIdTemplate})`)
+      logInfo(`behaviorFile: ${notifyResolved.behaviorFile}`)
     } else {
-      logInfo(`notify.command: ${effectiveCommand}`)
+      logInfo(`notify mode: command (${notifyResolved.command})`)
     }
     logInfo(`notify log: ${notifyResolved.logFile}`)
     logInfo(`quiet period: ${notifyResolved.quietPeriodSec}s (per chat)`)
+    logInfo(`notify timeout: ${notifyResolved.timeoutSec === 0 ? 'disabled' : notifyResolved.timeoutSec + 's'}`)
 
     const dispatcher = new Dispatcher({
-      command: effectiveCommand,
-      logFile: notifyResolved.logFile,
+      notify: notifyResolved,
       verbose,
       onWarning: (msg) => console.error(`[warn] ${msg}`),
+      onInfo: logInfo,
     })
 
     const notifier = new Notifier({
       quietPeriodSec: notifyResolved.quietPeriodSec,
       maxBufferedPerChat: notifyResolved.maxBufferedPerChat,
-      dispatch: (payload) => dispatcher.dispatch(payload),
+      dispatch: async (payload) => {
+        const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf-8')
+        const label = payload.chatName ? `"${payload.chatName}" (${payload.chatId})` : payload.chatId
+        logInfo(
+          `flushed batch chat=${label} msgs=${payload.messageCount} senders=${payload.senderCount} bytes=${bytes}`
+        )
+        const result = await dispatcher.dispatch(payload)
+        if (result) {
+          logFlushResult(logInfo, result)
+        }
+      },
       onError: (err, ctx) => console.error(`[warn] notifier error in ${ctx}: ${formatError(err)}`),
     })
 
@@ -66,12 +89,15 @@ export const runCommand = new Command('run')
 
     let shuttingDown = false
     const shutdown = async (signal: string) => {
-      if (shuttingDown) return
+      if (shuttingDown) {
+        logInfo(`received second ${signal}; exiting immediately`)
+        process.exit(1)
+      }
       shuttingDown = true
       logInfo(`received ${signal}, shutting down`)
       try {
         await notifier.close()
-        await dispatcher.drain()
+        await dispatcher.shutdown({ drainTimeoutMs: 5000 })
       } catch (err) {
         console.error(`[warn] error during flush: ${formatError(err)}`)
       }
@@ -92,9 +118,24 @@ export const runCommand = new Command('run')
 
     logInfo('connecting to WhatsApp...')
     await client.connect()
-
-    await new Promise<void>(() => {})
   })
+
+function logFlushResult(log: (msg: string) => void, result: DispatchResult): void {
+  if (result.mode === 'disabled') {
+    log(`notify logged only (mode=disabled) elapsed=${result.elapsedMs}ms`)
+    return
+  }
+  if (result.spawnError) {
+    log(`notify spawn failed: ${result.spawnError}`)
+    return
+  }
+  if (result.timedOut) {
+    log(`notify timed out elapsed=${result.elapsedMs}ms`)
+    return
+  }
+  const exitLabel = result.signal ? `signal=${result.signal}` : `exit=${result.exitCode ?? '?'}`
+  log(`notify ${exitLabel} elapsed=${result.elapsedMs}ms`)
+}
 
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message

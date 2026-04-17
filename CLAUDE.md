@@ -54,33 +54,52 @@ npm run dev      # Watch mode
 
 ## Configuration
 
-Config stored at `~/.whatsapp-monitor/config.json`:
+Config stored at `~/.whatsapp-monitor/config.json`. Two mutually-exclusive notify modes:
 
 ```json
+// Structured mode (preferred for OpenClaw)
 {
   "allowedGroups": ["123@g.us"],
   "allowedContacts": ["123@s.whatsapp.net"],
   "authDir": "~/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --session-id wa-monitor --message \"$(cat)\"",
-    "quietPeriodSec": 120,
+    "kind": "openclaw-agent",
+    "agent": "main",
+    "sessionIdTemplate": "wa-monitor-{date}",
+    "behaviorFile": "~/.whatsapp-monitor/behavior.md",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120,
     "logFile": "~/.whatsapp-monitor/notifications.jsonl",
     "maxBufferedPerChat": 50
   }
 }
 ```
 
-### `notify.command` contract
+```json
+// Command mode (webhooks, logs, anything else)
+{
+  "notify": {
+    "command": "tee -a ~/whatsapp-digest.jsonl",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
+  }
+}
+```
 
-- Invoked via `sh -c` for every batched notification.
-- JSON payload written to child **stdin** (see `NotificationPayload` in `src/types.ts`).
-- Convenience env vars: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP`, `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`.
-- Each payload is also appended to `logFile` regardless of command outcome (durable record).
+Setting both `command` and `kind` is a config error. See `skills/whatsapp-monitor/SKILL.md` for the full onboarding and field reference.
+
+### Notify contract
+
+- **Structured mode (`kind: "openclaw-agent"`)**: dispatcher calls `spawn('openclaw', ['agent', '--agent', ..., '--session-id', resolvedTemplate, '--message', brief+'\n\n---\n\n'+json])`. No shell, no quoting. `behaviorFile` read once per dispatch.
+- **Command mode (`command: "..."`)**: invoked via `sh -c` for every batched notification. JSON payload written to child **stdin**. Convenience env vars: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP`, `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`.
+- Each payload is always appended to `logFile` regardless of command outcome (durable record).
+- `timeoutSec` bounds each child: SIGTERM at timeout, SIGKILL 2s later.
 - Non-zero exits are logged but don't crash the service. Invocations are serialized per chat.
+- On shutdown (SIGINT/SIGTERM): in-flight children are SIGTERM'd, 5s drain window, then SIGKILL.
 
 ## Throttling
 
-Per-chat quiet-period flush: buffer inbound messages; flush one batched payload after `quietPeriodSec` of no new messages in that chat. Default 120s. `0` disables batching (one payload per message).
+Per-chat quiet-period flush: buffer inbound messages; flush one batched payload after `quietPeriodSec` of no new messages in that chat. Default 30s. `0` disables batching (one payload per message).
 
 ## Service lifecycle
 

@@ -6,7 +6,9 @@ allowed-tools: Bash(whatsapp-monitor *), Bash(openclaw agent *), Bash(cat *), Ba
 
 # whatsapp-monitor Skill
 
-Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted chats are batched and piped into a shell command (`notify.command`) — typically `openclaw agent ...` for OpenClaw users. This skill has everything needed to onboard a user and operate the service; you should not need to read other files.
+> **Requires whatsapp-monitor >= 1.3.0** (npm package `whatsapp-monitor`). If the installed version is older, Step 0 will tell you how to upgrade. Features below (structured `notify.kind`, `notify.timeoutSec`, clean shutdown, explicit `notify test` output) are all 1.3.0+.
+
+Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted chats are batched and handed to a configured notifier — either a structured `notify.kind: "openclaw-agent"` (first-class OpenClaw integration, no shell quoting) or a user-defined `notify.command` (arbitrary shell). This skill has everything needed to onboard a user and operate the service; you should not need to read other files.
 
 > **For OpenClaw agents**: this is **not** the same as `@openclaw/whatsapp`.
 >
@@ -28,9 +30,14 @@ Before anything else, confirm `whatsapp-monitor` is on the user's `PATH`. Every 
 which whatsapp-monitor && whatsapp-monitor --version
 ```
 
-- If both succeed and the version is `1.2.0` or newer → skip to Step 1.
+- If both succeed and the version is `1.3.0` or newer → skip to Step 1.
 - If `which` fails (command not found) → install it (see below).
-- If the version is older than `1.2.0` → upgrade it (`npm install -g whatsapp-monitor@latest`). The service-style `run` command and the `notify.command` pipeline this skill depends on were added in `1.2.0`.
+- If the version is older than `1.3.0` → **upgrade, don't proceed**. Earlier versions are missing the structured `notify.kind`, `notify.timeoutSec`, and the step-by-step `notify test` output this skill depends on. Run:
+
+  ```bash
+  npm install -g whatsapp-monitor@latest
+  whatsapp-monitor --version   # confirm >= 1.3.0
+  ```
 
 **Install command (canonical):**
 
@@ -47,7 +54,7 @@ Notes for the agent:
 Verify the install:
 
 ```bash
-whatsapp-monitor --version   # should print 1.2.0 (or newer)
+whatsapp-monitor --version   # must print 1.3.0 or newer
 whatsapp-monitor --help      # confirms the `run` and `notify` commands are present
 ```
 
@@ -158,13 +165,9 @@ Ask the user which agent should handle these notifications:
 
 Let `<AGENT_ID>` be the user's answer. We'll use it in the next step.
 
-### Step 5 — Configure `notify.command` and verify
+### Step 5 — Configure the `notify` block (structured mode) and verify
 
-The `notify.command` does three things in one shell expression:
-
-- **Rolls the session daily** by suffixing the session id with `$(date +%F)` — each calendar day gets a fresh session (`wa-monitor-YYYY-MM-DD`), capping context cost and noise.
-- **Prefixes the behavior brief** onto every message. Yes, this re-sends the brief on every notification — but `quietPeriodSec` keeps the frequency low (typically a few calls per hour per chat), the brief is short (a paragraph or two), and the approach is stateless: no priming to track, no markers to clean up, changes to `behavior.md` take effect on the very next notification.
-- **Appends the batched JSON payload** after the brief.
+Use the first-class **structured** mode for OpenClaw integration — no shell quoting, the daemon handles session rolling, behavior-brief loading, and argv assembly internally. It also gives you `timeoutSec` protection against a hung `openclaw agent` call.
 
 Edit `~/.whatsapp-monitor/config.json` to add the `notify` block. Read the existing config first and merge — don't clobber `allowedGroups` or `authDir`:
 
@@ -180,19 +183,25 @@ Write a merged config like this (substitute the real `<AGENT_ID>`):
   "allowedContacts": [],
   "authDir": "/Users/you/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --message \"$(printf '%s\\n\\n---\\n\\n' \"$(cat ~/.whatsapp-monitor/behavior.md)\")$(cat)\"",
-    "quietPeriodSec": 120
+    "kind": "openclaw-agent",
+    "agent": "<AGENT_ID>",
+    "sessionIdTemplate": "wa-monitor-{date}",
+    "behaviorFile": "~/.whatsapp-monitor/behavior.md",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
   }
 }
 ```
 
-What that `--message` argument does: reads `~/.whatsapp-monitor/behavior.md`, appends a `---` separator, then appends the JSON payload from stdin. The agent sees the rules and the payload together, every time.
+What each field does:
 
-If the inline shell is too cramped to edit comfortably, a two-line variant is equivalent and easier to read:
+- `kind: "openclaw-agent"` selects the structured OpenClaw dispatcher. Runs `openclaw agent` directly via `spawn` — no shell, no quoting.
+- `agent` — which OpenClaw agent handles the turn.
+- `sessionIdTemplate` — supports `{date}` → `YYYY-MM-DD`, `{week}` → `YYYY-Www`, `{chatId}`, `{chatIdSlug}`. Default is `wa-monitor-{date}` (daily rolling). Use `wa-monitor` (no substitution) for a single persistent session, or `wa-monitor-{chatIdSlug}` to isolate per-chat.
+- `behaviorFile` — the daemon prepends this file's contents (plus a `---` separator) to the JSON payload for every dispatch. Re-read on every call so edits to the brief take effect immediately. No priming state to manage.
+- `timeoutSec` — hard cap on how long `openclaw agent` can run per call. SIGTERM then SIGKILL. Default 120.
 
-```json
-"command": "PAYLOAD=\"$(cat)\"; openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --message \"$(cat ~/.whatsapp-monitor/behavior.md)\n\n---\n\n$PAYLOAD\""
-```
+If the user wants something that isn't OpenClaw (webhook, log-only, custom script), use `notify.command` instead — see the Reference section below. The two modes are mutually exclusive; setting both is a config error.
 
 #### Where does the agent's reply go?
 
@@ -200,7 +209,19 @@ By default, `openclaw agent` **prints its reply to stdout and does not deliver i
 
 **When the agent needs to reach the user, it must initiate that itself** — by calling one of its own configured messaging tools (Slack, Telegram, Discord, whatever). The behavior brief should say "call your Slack tool / Telegram tool to notify me," not "reply to me," so the agent doesn't think printing a reply is enough.
 
-If instead you want **every batch auto-delivered to a channel as an OpenClaw reply** (unusual, but valid for simple "forward everything" setups), add `--deliver` plus delivery flags to the command:
+If instead you want **every batch auto-delivered to a channel as an OpenClaw reply** (unusual, but valid for simple "forward everything" setups), structured mode does not expose OpenClaw's `--deliver` / `--reply-channel` flags directly. Drop back to `notify.command` mode:
+
+```json
+{
+  "notify": {
+    "command": "openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --deliver --reply-channel telegram --reply-to <your-telegram-chat-id> --message \"$(printf '%s\\n\\n---\\n\\n' \"$(cat ~/.whatsapp-monitor/behavior.md)\")$(cat)\"",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
+  }
+}
+```
+
+Relevant OpenClaw flags:
 
 | Flag | Purpose |
 |---|---|
@@ -209,13 +230,7 @@ If instead you want **every batch auto-delivered to a channel as an OpenClaw rep
 | `--reply-to <target>` | Where inside the channel (a chat id, `#channel`, `@user`). Format depends on the channel — check `openclaw agent --help` or the channel's docs. |
 | `--reply-account <id>` | Which configured account in that channel (multi-account setups). |
 
-Example always-deliver variant:
-
-```json
-"command": "openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --deliver --reply-channel telegram --reply-to <your-telegram-chat-id> --message \"$(printf '%s\\n\\n---\\n\\n' \"$(cat ~/.whatsapp-monitor/behavior.md)\")$(cat)\""
-```
-
-Prefer the default (no `--deliver`) for the time-sensitive-vs-digest pattern. The agent's tool-calling gives finer-grained control than `--deliver` can — "alert only if urgent" is the agent's judgment call, not a daemon-level always-on flag.
+Prefer the structured-mode default (no `--deliver`) for the time-sensitive-vs-digest pattern. The agent's tool-calling gives finer-grained control than `--deliver` can — "alert only if urgent" is the agent's judgment call, not a daemon-level always-on flag.
 
 #### Test the pipeline
 
@@ -223,7 +238,26 @@ Prefer the default (no `--deliver`) for the time-sensitive-vs-digest pattern. Th
 whatsapp-monitor notify test
 ```
 
-This fires a synthetic payload through `notify.command`. Check today's session on the agent's side — the agent should have received the brief + payload and responded according to the behavior brief (for a synthetic test, the expected response is usually "non-urgent / logged"). If the agent reacted sensibly, the wiring is correct.
+Expected output for a healthy config (1.3.0+):
+
+```
+notify test (dry run)
+[info] config loaded from /Users/you/.whatsapp-monitor/config.json
+[info] notify mode: openclaw-agent
+[info] resolved target: openclaw agent --agent main --session-id wa-monitor-2026-04-17
+[info] behaviorFile:    /Users/you/.whatsapp-monitor/behavior.md
+[step] generating synthetic payload (1 message, N bytes json)
+[step] appending to log: /Users/you/.whatsapp-monitor/notifications.jsonl
+[step] spawning child and waiting (timeout: 120s)
+[ok]   log append
+[ok  ] child exited: code=0, elapsed=XXXms, stdin=0 bytes
+[info] stdout: <agent's acknowledgement, truncated>
+[result] ok
+```
+
+Exit code 0 means every step passed. Non-zero means at least one step failed — the `[fail]` line names which one (log append, spawn, non-zero exit, timeout). See Troubleshooting below.
+
+**What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end alert delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 6).
 
 ### Step 6 — Run the service under a process manager
 
@@ -248,7 +282,38 @@ launchctl list | grep whatsapp-monitor
 systemctl --user status whatsapp-monitor
 ```
 
-Send a test message from another device to an allowlisted chat, wait up to `quietPeriodSec` (default 120s), and confirm the agent session received it.
+#### First live test — optionally shorten `quietPeriodSec`
+
+The default `quietPeriodSec: 30` is already fairly snappy (30 seconds after each message before the notifier fires). For the first end-to-end verification you may want it even tighter — set to `5` (or `0` to disable batching entirely) while iterating, then raise it back to `30` or higher once you're satisfied:
+
+```json
+"notify": {
+  "kind": "openclaw-agent",
+  "agent": "<AGENT_ID>",
+  "quietPeriodSec": 5,
+  "timeoutSec": 120
+}
+```
+
+Reload the service so the new config takes effect:
+
+```bash
+# macOS
+launchctl unload ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+launchctl load ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+# Linux
+systemctl --user restart whatsapp-monitor
+```
+
+Now send a message from another device to an allowlisted chat. Within ~5 seconds you should see the flush in the service log and (if the behavior brief said to alert) the agent reaching out via its messaging tool.
+
+Once verified, restore the production value:
+
+```json
+"quietPeriodSec": 30
+```
+
+and reload the service the same way.
 
 Onboarding is complete.
 
@@ -294,7 +359,9 @@ Fires one synthetic payload through `notify.command`. Use to verify wiring.
 
 ### Config file reference
 
-Full shape of `~/.whatsapp-monitor/config.json`:
+`~/.whatsapp-monitor/config.json` supports two mutually-exclusive notify modes.
+
+**Structured mode** (preferred for OpenClaw — no shell quoting, cleaner config):
 
 ```json
 {
@@ -302,20 +369,41 @@ Full shape of `~/.whatsapp-monitor/config.json`:
   "allowedContacts": ["1234567890@s.whatsapp.net"],
   "authDir": "/Users/you/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --agent main --session-id \"wa-monitor-$(date +%F)\" --message \"$(printf '%s\\n\\n---\\n\\n' \"$(cat ~/.whatsapp-monitor/behavior.md)\")$(cat)\"",
-    "quietPeriodSec": 120,
+    "kind": "openclaw-agent",
+    "agent": "main",
+    "sessionIdTemplate": "wa-monitor-{date}",
+    "behaviorFile": "~/.whatsapp-monitor/behavior.md",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120,
     "logFile": "/Users/you/.whatsapp-monitor/notifications.jsonl",
     "maxBufferedPerChat": 50
   }
 }
 ```
 
-`notify.command` is any shell command that reads the JSON payload from stdin. The default shown above is the OpenClaw recipe from Step 5 (daily-rolling session, behavior brief prepended). For non-OpenClaw setups, substitute whatever you want — a webhook, a log, a script.
+**Command mode** (anything that isn't structured — webhooks, logs, scripts, or OpenClaw with non-default flags like `--deliver`):
+
+```json
+{
+  "notify": {
+    "command": "tee -a ~/whatsapp-digest.jsonl",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
+  }
+}
+```
+
+Setting both `command` and `kind` is a config error — the loader rejects it with a clear message.
 
 | Field | Default | Description |
 |---|---|---|
-| `notify.command` | _(none)_ | Shell command invoked via `sh -c`. Receives JSON on stdin. |
-| `notify.quietPeriodSec` | `120` | Per-chat quiet period before flushing a batch. `0` disables batching. |
+| `notify.kind` | _(none)_ | Structured mode selector. Only `"openclaw-agent"` is supported today. Exclusive with `notify.command`. |
+| `notify.agent` | _(required if kind=openclaw-agent)_ | OpenClaw agent id (the `--agent` value). |
+| `notify.sessionIdTemplate` | `"wa-monitor-{date}"` | Template with `{date}` (YYYY-MM-DD), `{week}` (YYYY-Www), `{chatId}`, `{chatIdSlug}` substitutions. |
+| `notify.behaviorFile` | `~/.whatsapp-monitor/behavior.md` | File prepended to each dispatch with a `---` separator. Re-read every call. |
+| `notify.command` | _(none)_ | Command mode: shell command invoked via `sh -c`. Receives JSON on stdin. Exclusive with `notify.kind`. |
+| `notify.quietPeriodSec` | `30` | Per-chat quiet period before flushing a batch. `0` disables batching. |
+| `notify.timeoutSec` | `120` | Hard cap on child process runtime. SIGTERM then 2s grace then SIGKILL. `0` disables. |
 | `notify.logFile` | `~/.whatsapp-monitor/notifications.jsonl` | Where each payload is appended regardless of command outcome. |
 | `notify.maxBufferedPerChat` | `50` | Safety cap; forces a flush if reached. |
 
@@ -373,6 +461,8 @@ There are no markers or priming state to clean up when you change cadence — ju
 Drop one of these into `~/.whatsapp-monitor/behavior.md` (or adapt to the user's actual preference) in Step 3.
 
 > **Important phrasing note**: the agent's textual reply to `openclaw agent --message ...` goes to the service log, not to the user. When the brief says "notify me" or "alert me," the agent must call one of its own configured messaging tools (Slack, Telegram, etc.) to reach the user — a plain reply is invisible. Phrase alert instructions as **"call your <Slack/Telegram/whatever> tool"** so the agent doesn't assume its reply is enough.
+
+> **Test-noise rule worth including in every brief**: if a batch is obviously a self-sent test — single short message from the user's own contact id, content like "test", "בדיקה", "ping", "check", or similar — drop it. Don't alert, don't add it to the digest. Self-tests aren't signal and clutter end-of-day summaries.
 
 **Example A — time-sensitive vs digest** (the original motivating case):
 
@@ -520,6 +610,111 @@ journalctl --user -u whatsapp-monitor -f   # logs
 
 ---
 
+## Troubleshooting
+
+### Version mismatch — `whatsapp-monitor` older than 1.3.0
+
+Symptoms: `notify test` prints the old "Dispatching synthetic payload... / Done." output, or `notify.kind` is rejected, or `timeoutSec` is ignored.
+
+Fix:
+
+```bash
+npm install -g whatsapp-monitor@latest
+whatsapp-monitor --version   # must print 1.3.0 or newer
+```
+
+Restart the service after upgrading (launchd `unload`+`load`, or `systemctl --user restart whatsapp-monitor`).
+
+### Linux: `systemctl --user` can't connect to the user bus
+
+Symptoms: `systemctl --user status whatsapp-monitor` prints `Failed to connect to bus: No such file or directory` or similar — typically on freshly-logged-in non-graphical sessions, headless servers, or containers.
+
+The user systemd needs `XDG_RUNTIME_DIR` and, for some tools, `DBUS_SESSION_BUS_ADDRESS`:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+```
+
+Add those to `~/.bashrc` (or equivalent) if the shell doesn't set them by default. If `loginctl enable-linger $USER` hasn't been run, the user services will also stop when the user logs out — enable lingering if the service should survive logout.
+
+### `notify test` exits non-zero
+
+The `[fail]` line names the failing step. In order of what it might be:
+
+- **`config load failed: ...`** — `~/.whatsapp-monitor/config.json` has invalid JSON, or `notify.command` and `notify.kind` are both set. Fix the config file and re-test.
+- **`no notify.command or notify.kind is configured`** — config has no notify block at all. Add one (see Step 5).
+- **`log append failed: ...`** — the JSONL log path is not writable. Check permissions on `notify.logFile` and its parent directory.
+- **`child spawn failed: ...`** — the executable isn't found. For structured mode: `openclaw` not on `PATH` for the service user. For command mode: your command name is misspelled. Verify with `which openclaw` (or your command name).
+- **`child exited: code=127`** — shell command reports "not found." Same as above but from inside the shell.
+- **`child timed out after ...`** — the child ran longer than `notify.timeoutSec`. Either its work is actually slow (raise `timeoutSec`), or it's hung (investigate the child — OpenClaw gateway stuck, Telegram API not responding, etc.).
+- **`child exited: code=<nonzero>`** — the command ran but failed. The stderr preview usually explains why.
+
+### launchd/systemd: lingering children on stop (1.3.0+ should have fixed this)
+
+Symptoms: `launchctl unload` or `systemctl stop` takes the full stop-timeout before succeeding, journal shows `SIGKILL after timeout` or `status=143`, and/or orphaned `sh -c openclaw ...` processes persist.
+
+If you're on 1.3.0+ and this still happens, check:
+
+- `notify.timeoutSec` is not `0` (child runtime is unbounded).
+- The behavior brief doesn't make the agent start long-running background work that outlives the turn.
+- `launchctl list | grep whatsapp` / `pgrep -af whatsapp-monitor` to see what's still around.
+
+1.3.0 sends SIGTERM to in-flight children on shutdown and waits up to 5 seconds before SIGKILL. If you need more headroom, set `TimeoutStopSec=15` (systemd) or accept launchd's default.
+
+### PATH issues inside launchd/systemd
+
+Symptoms: `notify test` works from your shell but fails in the service with `openclaw: command not found` (structured mode) or similar for command mode.
+
+launchd and systemd don't inherit your shell's `PATH`. Make `openclaw` reachable:
+
+- **launchd**: add `<key>PATH</key><string>...</string>` inside `EnvironmentVariables` (see [Process manager recipes](#process-manager-recipes) above). Include the directory `which openclaw` reports.
+- **systemd user service**: set `Environment=PATH=...` in the unit file similarly.
+
+Reload the service after editing the plist/unit file.
+
+---
+
+## Uninstall / reset
+
+Clean removal when a user wants to stop using `whatsapp-monitor`:
+
+```bash
+# 1. Stop and remove the service.
+# macOS:
+launchctl unload ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+rm ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+# Linux:
+systemctl --user disable --now whatsapp-monitor
+rm ~/.config/systemd/user/whatsapp-monitor.service
+systemctl --user daemon-reload
+
+# 2. Unlink the WhatsApp device (optional but recommended — otherwise it
+#    shows up in the user's "Linked Devices" list on their phone forever).
+#    Do this from the phone: WhatsApp → Settings → Linked Devices → tap the
+#    "WhatsApp Monitor" entry → Log Out.
+
+# 3. Remove the CLI.
+npm uninstall -g whatsapp-monitor
+
+# 4. Remove state (optional — this wipes the linked auth, allowlist, logs,
+#    and behavior.md; full re-onboarding required after this).
+rm -rf ~/.whatsapp-monitor
+```
+
+What each step removes:
+
+| Command | Removes |
+|---|---|
+| `launchctl unload` / `systemctl disable` | The service definition. The running process stops. |
+| Phone-side "Log Out" | The linked-device entry on WhatsApp's side. |
+| `npm uninstall -g` | The `whatsapp-monitor` binary. |
+| `rm -rf ~/.whatsapp-monitor` | All state: Baileys auth (credentials), allowlist, behavior brief, notify log. |
+
+Step 4 is intentionally separate — users who plan to reinstall later should skip it so the allowlist, behavior brief, and linked-device state survive. Removing `~/.whatsapp-monitor` requires a full re-onboarding including `link`.
+
+---
+
 ## Trust and safety boundary
 
 - The linked WhatsApp account is the user's **personal** number.
@@ -530,6 +725,6 @@ journalctl --user -u whatsapp-monitor -f   # logs
 ## Prerequisites
 
 - Node.js >= 18 (`node --version`).
-- `whatsapp-monitor` >= 1.2.0 on `PATH` (see Step 0).
+- `whatsapp-monitor` >= 1.3.0 on `PATH` (see Step 0).
 - For OpenClaw integration: `openclaw` CLI installed and reachable on `PATH` for the service user — including inside launchd/systemd (see process-manager notes above).
 - At least one chat in the allowlist (Step 2) before `run` will start.

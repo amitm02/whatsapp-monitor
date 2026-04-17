@@ -1,15 +1,18 @@
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
-import { join, dirname } from 'path'
-import type { MonitorConfig, NotifyConfig } from './types.js'
+import { join, dirname, isAbsolute } from 'path'
+import type { MonitorConfig, NotifyConfig, ResolvedNotify } from './types.js'
 
 const CONFIG_DIR = join(homedir(), '.whatsapp-monitor')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const DEFAULT_AUTH_DIR = join(CONFIG_DIR, 'auth')
 const DEFAULT_NOTIFY_LOG = join(CONFIG_DIR, 'notifications.jsonl')
-const DEFAULT_QUIET_PERIOD_SEC = 120
+const DEFAULT_BEHAVIOR_FILE = join(CONFIG_DIR, 'behavior.md')
+const DEFAULT_QUIET_PERIOD_SEC = 30
+const DEFAULT_TIMEOUT_SEC = 120
 const DEFAULT_MAX_BUFFERED_PER_CHAT = 50
+const DEFAULT_SESSION_ID_TEMPLATE = 'wa-monitor-{date}'
 
 const DEFAULT_CONFIG: MonitorConfig = {
   allowedGroups: [],
@@ -17,48 +20,106 @@ const DEFAULT_CONFIG: MonitorConfig = {
   authDir: DEFAULT_AUTH_DIR,
 }
 
-function normalizeNotify(input: Partial<NotifyConfig> | undefined): NotifyConfig | undefined {
+export class NotifyConfigError extends Error {}
+
+function expandHome(p: string): string {
+  if (p === '~') return homedir()
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2))
+  return p
+}
+
+function resolvePath(p: string, base: string): string {
+  const expanded = expandHome(p)
+  return isAbsolute(expanded) ? expanded : join(base, expanded)
+}
+
+function normalizeNotify(input: unknown): NotifyConfig | undefined {
   if (!input || typeof input !== 'object') return undefined
+  const raw = input as Record<string, unknown>
   const notify: NotifyConfig = {}
-  if (typeof input.command === 'string' && input.command.trim() !== '') {
-    notify.command = input.command
+
+  if (typeof raw.command === 'string' && raw.command.trim() !== '') {
+    notify.command = raw.command
   }
-  if (typeof input.quietPeriodSec === 'number' && input.quietPeriodSec >= 0) {
-    notify.quietPeriodSec = input.quietPeriodSec
+  if (raw.kind !== undefined) {
+    if (raw.kind !== 'openclaw-agent') {
+      throw new NotifyConfigError(`notify.kind must be "openclaw-agent" (got ${JSON.stringify(raw.kind)})`)
+    }
+    notify.kind = raw.kind
   }
-  if (typeof input.logFile === 'string' && input.logFile.trim() !== '') {
-    notify.logFile = input.logFile
+  if (typeof raw.agent === 'string' && raw.agent.trim() !== '') notify.agent = raw.agent
+  if (typeof raw.sessionIdTemplate === 'string' && raw.sessionIdTemplate.trim() !== '') {
+    notify.sessionIdTemplate = raw.sessionIdTemplate
   }
-  if (typeof input.maxBufferedPerChat === 'number' && input.maxBufferedPerChat > 0) {
-    notify.maxBufferedPerChat = input.maxBufferedPerChat
+  if (typeof raw.behaviorFile === 'string' && raw.behaviorFile.trim() !== '') {
+    notify.behaviorFile = raw.behaviorFile
   }
+  if (typeof raw.quietPeriodSec === 'number' && raw.quietPeriodSec >= 0) {
+    notify.quietPeriodSec = raw.quietPeriodSec
+  }
+  if (typeof raw.timeoutSec === 'number' && raw.timeoutSec >= 0) {
+    notify.timeoutSec = raw.timeoutSec
+  }
+  if (typeof raw.logFile === 'string' && raw.logFile.trim() !== '') {
+    notify.logFile = raw.logFile
+  }
+  if (typeof raw.maxBufferedPerChat === 'number' && raw.maxBufferedPerChat > 0) {
+    notify.maxBufferedPerChat = raw.maxBufferedPerChat
+  }
+
+  if (notify.command && notify.kind) {
+    throw new NotifyConfigError(
+      'notify.command and notify.kind are mutually exclusive. Pick one: set "command" for a custom shell pipeline, or "kind" for a structured integration.'
+    )
+  }
+  if (notify.kind === 'openclaw-agent' && !notify.agent) {
+    throw new NotifyConfigError('notify.kind = "openclaw-agent" requires notify.agent (the OpenClaw agent id)')
+  }
+
   return Object.keys(notify).length > 0 ? notify : undefined
 }
 
-export function resolveNotifyDefaults(notify: NotifyConfig | undefined): Required<NotifyConfig> {
-  return {
-    command: notify?.command ?? '',
+export function resolveNotify(notify: NotifyConfig | undefined): ResolvedNotify {
+  const base = {
     quietPeriodSec: notify?.quietPeriodSec ?? DEFAULT_QUIET_PERIOD_SEC,
-    logFile: notify?.logFile ?? DEFAULT_NOTIFY_LOG,
+    timeoutSec: notify?.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
+    logFile: resolvePath(notify?.logFile ?? DEFAULT_NOTIFY_LOG, CONFIG_DIR),
     maxBufferedPerChat: notify?.maxBufferedPerChat ?? DEFAULT_MAX_BUFFERED_PER_CHAT,
   }
+
+  if (notify?.kind === 'openclaw-agent') {
+    return {
+      ...base,
+      mode: 'openclaw-agent',
+      agent: notify.agent!,
+      sessionIdTemplate: notify.sessionIdTemplate ?? DEFAULT_SESSION_ID_TEMPLATE,
+      behaviorFile: resolvePath(notify.behaviorFile ?? DEFAULT_BEHAVIOR_FILE, CONFIG_DIR),
+    }
+  }
+
+  if (notify?.command) {
+    return { ...base, mode: 'command', command: notify.command }
+  }
+
+  return { ...base, mode: 'disabled' }
 }
 
 export async function loadConfig(): Promise<MonitorConfig> {
+  if (!existsSync(CONFIG_FILE)) {
+    return { ...DEFAULT_CONFIG }
+  }
+  let parsed: Partial<MonitorConfig>
   try {
-    if (!existsSync(CONFIG_FILE)) {
-      return { ...DEFAULT_CONFIG }
-    }
     const content = await readFile(CONFIG_FILE, 'utf-8')
-    const parsed = JSON.parse(content) as Partial<MonitorConfig>
-    return {
-      allowedGroups: parsed.allowedGroups ?? [],
-      allowedContacts: parsed.allowedContacts ?? [],
-      authDir: parsed.authDir ?? DEFAULT_AUTH_DIR,
-      notify: normalizeNotify(parsed.notify),
-    }
+    parsed = JSON.parse(content) as Partial<MonitorConfig>
   } catch {
     return { ...DEFAULT_CONFIG }
+  }
+  return {
+    allowedGroups: parsed.allowedGroups ?? [],
+    allowedContacts: parsed.allowedContacts ?? [],
+    authDir: parsed.authDir ?? DEFAULT_AUTH_DIR,
+    notify: normalizeNotify(parsed.notify),
   }
 }
 

@@ -2,10 +2,40 @@ import type { proto } from '@whiskeysockets/baileys'
 
 export interface NotifyConfig {
   command?: string
+  kind?: 'openclaw-agent'
+  agent?: string
+  sessionIdTemplate?: string
+  behaviorFile?: string
   quietPeriodSec?: number
+  timeoutSec?: number
   logFile?: string
   maxBufferedPerChat?: number
 }
+
+export interface ResolvedNotifyBase {
+  quietPeriodSec: number
+  timeoutSec: number
+  logFile: string
+  maxBufferedPerChat: number
+}
+
+export interface ResolvedNotifyCommand extends ResolvedNotifyBase {
+  mode: 'command'
+  command: string
+}
+
+export interface ResolvedNotifyOpenClaw extends ResolvedNotifyBase {
+  mode: 'openclaw-agent'
+  agent: string
+  sessionIdTemplate: string
+  behaviorFile: string
+}
+
+export interface ResolvedNotifyDisabled extends ResolvedNotifyBase {
+  mode: 'disabled'
+}
+
+export type ResolvedNotify = ResolvedNotifyCommand | ResolvedNotifyOpenClaw | ResolvedNotifyDisabled
 
 export interface MonitorConfig {
   allowedGroups: string[]

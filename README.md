@@ -51,18 +51,38 @@ Requires Node.js >= 18.
    whatsapp-monitor config add 1234567890@g.us
    ```
 
-3. **Configure a notify command** in `~/.whatsapp-monitor/config.json`:
+3. **Configure a notifier** in `~/.whatsapp-monitor/config.json`. Pick one of the two modes:
 
    ```json
+   // Structured mode — first-class OpenClaw integration, no shell quoting
+   {
+     "allowedGroups": ["1234567890@g.us"],
+     "allowedContacts": [],
+     "notify": {
+       "kind": "openclaw-agent",
+       "agent": "main",
+       "sessionIdTemplate": "wa-monitor-{date}",
+       "behaviorFile": "~/.whatsapp-monitor/behavior.md",
+       "quietPeriodSec": 30,
+       "timeoutSec": 120
+     }
+   }
+   ```
+
+   ```json
+   // Command mode — any shell command that reads JSON on stdin
    {
      "allowedGroups": ["1234567890@g.us"],
      "allowedContacts": [],
      "notify": {
        "command": "tee -a ~/whatsapp-digest.jsonl",
-       "quietPeriodSec": 120
+       "quietPeriodSec": 30,
+       "timeoutSec": 120
      }
    }
    ```
+
+   `kind` and `command` are mutually exclusive.
 
 4. **Verify the pipeline** before connecting WhatsApp:
 
@@ -114,9 +134,14 @@ When `quietPeriodSec: 0`, the same shape is emitted with `messageCount: 1` per m
 
 | Field | Default | Description |
 |---|---|---|
-| `command` | _(none)_ | Shell command invoked via `sh -c`. Receives JSON on stdin. |
-| `quietPeriodSec` | `120` | Per-chat quiet period before flushing a batch. `0` disables batching. |
-| `logFile` | `~/.whatsapp-monitor/notifications.jsonl` | Where each payload is appended, regardless of `command` outcome. |
+| `kind` | _(none)_ | Structured mode. `"openclaw-agent"` is the only supported value today. Exclusive with `command`. |
+| `agent` | _(required if kind=openclaw-agent)_ | OpenClaw agent id passed as `--agent`. |
+| `sessionIdTemplate` | `"wa-monitor-{date}"` | Template with `{date}`, `{week}`, `{chatId}`, `{chatIdSlug}` substitutions. |
+| `behaviorFile` | `~/.whatsapp-monitor/behavior.md` | File prepended to each dispatch with a `---` separator. Re-read every call. |
+| `command` | _(none)_ | Command mode: shell command invoked via `sh -c`. Receives JSON on stdin. Exclusive with `kind`. |
+| `quietPeriodSec` | `30` | Per-chat quiet period before flushing a batch. `0` disables batching. |
+| `timeoutSec` | `120` | Hard cap on child process runtime. SIGTERM then 2s grace then SIGKILL. `0` disables. |
+| `logFile` | `~/.whatsapp-monitor/notifications.jsonl` | Where each payload is appended regardless of command outcome. |
 | `maxBufferedPerChat` | `50` | Safety cap on buffered messages per chat before forced flush. |
 
 ### Recipes
@@ -234,8 +259,12 @@ Stored at `~/.whatsapp-monitor/config.json`:
   "allowedContacts": ["1234567890@s.whatsapp.net"],
   "authDir": "/Users/you/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --session-id wa-monitor --message \"$(cat)\"",
-    "quietPeriodSec": 120
+    "kind": "openclaw-agent",
+    "agent": "main",
+    "sessionIdTemplate": "wa-monitor-{date}",
+    "behaviorFile": "~/.whatsapp-monitor/behavior.md",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
   }
 }
 ```
