@@ -139,10 +139,11 @@ Now ask the user how they want the agent to handle incoming messages. Phrase it 
 
 > "When a new message arrives in one of these chats, what should happen? Here are some patterns people use:
 >
-> 1. **Time-sensitive vs digest**: if the message looks urgent (a direct question, time-sensitive request, family emergency), ping me immediately in our normal channel. Otherwise, save it for the end-of-day summary.
-> 2. **Keyword alert**: only ping me if the message mentions certain words (e.g. my name, 'tomorrow', 'urgent').
-> 3. **Always forward**: summarize and forward every batch.
-> 4. **Just log silently**: write it to memory so you can reference it later when I ask about it, but don't proactively tell me.
+> 1. **Relevance filter (recommended default)**: for every batch, you decide whether I'd care. If yes, ping me with a short summary right now. If not, drop it silently. Simple, stateless, no scheduled jobs.
+> 2. **Time-sensitive vs digest**: ping me immediately if it's urgent; otherwise add it to an end-of-day digest that gets sent on a schedule.
+> 3. **Keyword alert**: only ping me if the message mentions certain words (e.g. my name, 'tomorrow', 'urgent').
+> 4. **Always forward**: summarize and forward every batch.
+> 5. **Just log silently**: write it to memory so you can reference it later when I ask about it, but don't proactively tell me.
 >
 > What would you like, or do you have a different idea?"
 
@@ -518,7 +519,25 @@ Drop one of these into `~/.whatsapp-monitor/behavior.md` (or adapt to the user's
 
 > **Test-noise rule worth including in every brief**: if a batch is obviously a self-sent test — single short message from the user's own contact id, content like "test", "בדיקה", "ping", "check", or similar — drop it. Don't alert, don't add it to the digest. Self-tests aren't signal and clutter end-of-day summaries.
 
-**Example A — time-sensitive vs digest** (the original motivating case):
+**Example A — relevance filter (recommended default)**:
+
+```markdown
+# whatsapp-monitor behavior
+
+For each batch of messages that arrives in this session:
+
+1. Decide whether I'd actually want to know about this batch right now. Use your judgment about what I care about — what's happening with my family, work obligations, things that might affect my plans, things I'd want to react to or remember. Lean toward sending — I'd rather see a few extra summaries than miss something — but skip pure noise (forwards, memes, "good morning" greetings, group chatter that doesn't involve me, automated notifications).
+
+2. If **relevant**: call your Telegram tool (or whichever messaging tool reaches me) to send a short summary right now. One or two sentences: who the message is from, the chat it's in, and the gist. Do NOT rely on your text reply alone; it goes to a log, not to me.
+
+3. If **not relevant**: do nothing. No reply, no memory note, no log. Silence is fine — your text reply in this session goes to a log I never read.
+
+4. Never try to reply back to WhatsApp — you have no send capability on that account.
+
+This is stateless: no priming, no daily notes, no cron. Each batch stands alone.
+```
+
+**Example B — time-sensitive vs end-of-day digest** (the original motivating case; needs a scheduled job for delivery):
 
 ```markdown
 # whatsapp-monitor behavior
@@ -544,7 +563,7 @@ For each batch of messages that arrives in this session:
 **End-of-day delivery (active):** the digest should reach me on its own each evening, not wait for me to ask. If a scheduled job doesn't already do this for me, suggest one now — for example, a cron entry that runs `openclaw agent --agent <my-agent> --message "Send me today's WhatsApp digest now via my Telegram tool"` at 21:00 local time. Confirm with me whether it's already set up before assuming.
 ```
 
-**Example B — keyword alert only:**
+**Example C — keyword alert only:**
 
 ```markdown
 # whatsapp-monitor behavior
@@ -554,7 +573,7 @@ Only act when a message mentions any of: my name "Amit", "tomorrow", "urgent", o
 For everything else, do nothing — don't log, don't summarize, don't call any tool. Your text reply in this session goes to a log I never read, so silence is fine.
 ```
 
-**Example C — silent memory only:**
+**Example D — silent memory only:**
 
 ```markdown
 # whatsapp-monitor behavior
