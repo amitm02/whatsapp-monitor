@@ -117,32 +117,64 @@ Make the brief specific. "Tell me if urgent" is too vague. Good briefs include: 
 
 Confirm the brief with the user before continuing: read it back to them and ask "does this match what you want?"
 
-### Step 4 — Prime the session
+### Step 4 — Choose the agent and install the forwarder script
 
-The `notify.command` we'll configure in Step 5 will pipe each WhatsApp batch into a specific OpenClaw session (by default called `wa-monitor`). Before any real messages arrive, **you must seed that session with the behavior brief** so the agent knows how to handle the batches that follow.
+The `notify.command` we'll configure in Step 5 will pipe each WhatsApp batch into a **daily-rolling** OpenClaw session — a fresh session id each calendar day (`wa-monitor-YYYY-MM-DD`). Daily rolling caps context cost and matches the day-scoped nature of "what's urgent today" and "end-of-day digest". The first batch of each day primes the new session with the behavior brief; subsequent batches reuse it.
+
+Don't try to inline all of that in the config string. Install a small forwarder script and point `notify.command` at it.
 
 First, figure out which agent should handle these. Ask the user:
 
-> "Which OpenClaw agent should handle WhatsApp notifications? If you have a 'main' agent with memory about your family/work context, that's usually the right choice — we'll use a dedicated session so it doesn't clutter your normal chat with it. If you're not sure, run `openclaw agent --help` and check which agents are configured."
+> "Which OpenClaw agent should handle WhatsApp notifications? If you have a 'main' agent with memory about your family/work context, that's usually the right choice — we'll use a dedicated daily session so it doesn't clutter your normal chat with it. If you're not sure, run `openclaw agent --help` and check which agents are configured."
 
-Let `<AGENT_ID>` be the user's answer. Pick a stable session id — `wa-monitor` is a good default.
-
-Prime the session:
+Let `<AGENT_ID>` be the user's answer. Write the forwarder to `~/.whatsapp-monitor/forward.sh`:
 
 ```bash
-BRIEF="$(cat ~/.whatsapp-monitor/behavior.md)"
-openclaw agent --agent <AGENT_ID> --session-id wa-monitor --message "You are now the handler for this user's WhatsApp monitoring session.
+mkdir -p ~/.whatsapp-monitor
+cat > ~/.whatsapp-monitor/forward.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 
-From now on, every user message in this session will be a JSON payload from whatsapp-monitor, describing a batch of new WhatsApp messages (chatName, messages[], etc.). For each payload, follow the rules below.
+AGENT="__AGENT_ID__"
+STATE_DIR="$HOME/.whatsapp-monitor"
+BRIEF_FILE="$STATE_DIR/behavior.md"
+DAY="$(date +%Y-%m-%d)"
+SESSION="wa-monitor-$DAY"
+PRIMED_MARKER="$STATE_DIR/primed-$DAY"
+
+# Prime this day's session on first use.
+if [ ! -f "$PRIMED_MARKER" ]; then
+  BRIEF="$(cat "$BRIEF_FILE" 2>/dev/null || echo "(no behavior brief found at $BRIEF_FILE)")"
+  openclaw agent --agent "$AGENT" --session-id "$SESSION" --message "You are the handler for today's WhatsApp monitoring session ($DAY).
+
+From now on, every user message in this session will be a JSON payload from whatsapp-monitor — a batch of new WhatsApp messages (chatName, messages[], etc.). Follow the behavior brief below for each payload.
 
 --- behavior brief ---
 $BRIEF
 --- end brief ---
 
-When I (the user) talk to you directly in this session, I'll prefix my messages with \"[user]\" so you can distinguish them from monitor payloads. Ack this priming with a one-line confirmation, then wait for payloads."
+When I (the user) talk to you directly in this session, I'll prefix my messages with [user]. Ack this priming with one short line, then wait for payloads." >/dev/null
+  touch "$PRIMED_MARKER"
+fi
+
+# Forward the actual payload (stdin → agent message).
+exec openclaw agent --agent "$AGENT" --session-id "$SESSION" --message "$(cat)"
+EOF
+
+# Substitute the real agent id and mark executable.
+sed -i.bak "s/__AGENT_ID__/<AGENT_ID>/" ~/.whatsapp-monitor/forward.sh && rm ~/.whatsapp-monitor/forward.sh.bak
+chmod +x ~/.whatsapp-monitor/forward.sh
 ```
 
-Verify the agent acknowledged. If it didn't, stop and ask the user what went wrong.
+Replace `<AGENT_ID>` in the `sed` line with the real agent id before running. (If `sed -i.bak` syntax differs on the user's system, just hand-edit `~/.whatsapp-monitor/forward.sh` and replace `__AGENT_ID__` there.)
+
+Test the forwarder manually — this should cause today's session to be primed and acknowledge:
+
+```bash
+echo '{"chatId":"test@g.us","chatName":"priming check","isGroup":true,"firstTimestamp":0,"lastTimestamp":0,"messageCount":0,"senderCount":0,"messages":[]}' | ~/.whatsapp-monitor/forward.sh
+```
+
+Check the agent's normal channel — you should see the one-line priming ack. If not, stop and debug (common issues: `openclaw` not on PATH, wrong `<AGENT_ID>`, missing `~/.whatsapp-monitor/behavior.md`).
 
 ### Step 5 — Configure `notify.command` and verify
 
@@ -160,13 +192,13 @@ Write a merged config. Example shape after this step:
   "allowedContacts": [],
   "authDir": "/Users/you/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --agent <AGENT_ID> --session-id wa-monitor --message \"$(cat)\"",
+    "command": "~/.whatsapp-monitor/forward.sh",
     "quietPeriodSec": 120
   }
 }
 ```
 
-Substitute the real `<AGENT_ID>` and keep the session id matching what you primed in Step 4.
+The forwarder handles daily session rolling and first-use priming; `notify.command` just invokes it.
 
 Then test the pipeline before real messages start arriving:
 
@@ -253,13 +285,15 @@ Full shape of `~/.whatsapp-monitor/config.json`:
   "allowedContacts": ["1234567890@s.whatsapp.net"],
   "authDir": "/Users/you/.whatsapp-monitor/auth",
   "notify": {
-    "command": "openclaw agent --agent main --session-id wa-monitor --message \"$(cat)\"",
+    "command": "~/.whatsapp-monitor/forward.sh",
     "quietPeriodSec": 120,
     "logFile": "/Users/you/.whatsapp-monitor/notifications.jsonl",
     "maxBufferedPerChat": 50
   }
 }
 ```
+
+`notify.command` is typically the forwarder script from Step 4. For non-OpenClaw setups or custom logic, `notify.command` can be any shell command that reads the JSON payload from stdin.
 
 | Field | Default | Description |
 |---|---|---|
@@ -300,6 +334,22 @@ Full shape of `~/.whatsapp-monitor/config.json`:
 ```
 
 Convenience env vars also set on the child: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP` (`"true"`/`"false"`), `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`.
+
+### Session lifetime and rolling cadence
+
+OpenClaw sessions persist indefinitely on disk (`~/.openclaw/agents/<agent>/sessions/<session-id>.jsonl`) — there is no client-side expiry. Every turn includes prior context, so long sessions cost more per turn and carry old noise into new decisions. OpenClaw compacts automatically, but you still pay to re-summarize.
+
+The default forwarder script uses a **daily-rolling** session id (`wa-monitor-YYYY-MM-DD`). Each day starts fresh; the first payload primes it. Continuity across days lives in the agent's long-term memory (via the behavior brief), not in the session log.
+
+To change cadence, edit `~/.whatsapp-monitor/forward.sh`:
+
+| Cadence | `DAY` / `SESSION` lines |
+|---|---|
+| **Daily (default)** | `DAY="$(date +%Y-%m-%d)"` / `SESSION="wa-monitor-$DAY"` |
+| **Weekly** | `DAY="$(date +%Y-W%V)"` / `SESSION="wa-monitor-$DAY"` |
+| **Never roll** | Drop the `DAY` variable; `SESSION="wa-monitor"`; prime once manually instead of via first-use marker |
+
+If you change cadence, also clean up old priming markers (`rm ~/.whatsapp-monitor/primed-*`) so the next session gets primed correctly.
 
 ### Worked behavior-brief examples
 
@@ -351,18 +401,27 @@ Do not proactively message me about WhatsApp batches. For every batch, write a s
 
 Because `notify.command` is a shell command, you can filter before the agent sees anything. Examples:
 
-```sh
+These patterns live inside `~/.whatsapp-monitor/forward.sh` (the script, not the config). Edit it to skip or transform batches before the agent sees them:
+
+```bash
+# In forward.sh, before the "exec openclaw agent ..." line:
+
 # Only alert on group messages, ignore DMs
-"[ \"$WAM_IS_GROUP\" = \"true\" ] && openclaw agent --agent main --session-id wa-monitor --message \"$(cat)\" || true"
+if [ "$WAM_IS_GROUP" != "true" ]; then
+  cat >/dev/null   # drain stdin
+  exit 0
+fi
 
 # Only alert if any message contains 'urgent' (case-insensitive)
-"jq -e '.messages[].text | select(.) | test(\"urgent\"; \"i\")' >/dev/null && openclaw agent --agent main --session-id wa-monitor --message \"$(cat)\" || true"
-
-# Forward to a log AND the agent
-"tee -a ~/.whatsapp-monitor/archive.jsonl | openclaw agent --agent main --session-id wa-monitor --message \"$(cat)\""
+PAYLOAD="$(cat)"
+if ! echo "$PAYLOAD" | jq -e '.messages[].text | select(.) | test("urgent"; "i")' >/dev/null; then
+  exit 0
+fi
+echo "$PAYLOAD" | openclaw agent --agent "$AGENT" --session-id "$SESSION" --message "$(cat)"
+exit 0
 ```
 
-Prefer keeping logic in the agent's behavior brief rather than the shell — easier to evolve. Use shell filtering only for hard cutoffs (chat type, obvious noise).
+Prefer keeping decision logic in the agent's behavior brief rather than the shell — easier to evolve, the agent can reconsider edge cases. Use shell filtering only for hard cutoffs where you never want to spend an agent turn at all (chat type, obvious noise, keyword-only alerting).
 
 ---
 

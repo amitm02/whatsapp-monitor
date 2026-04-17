@@ -128,11 +128,13 @@ When `quietPeriodSec: 0`, the same shape is emitted with `messageCount: 1` per m
 # Slack webhook
 "command": "jq -r '\"\\(.chatName): \\(.messageCount) new messages\"' | curl -s -X POST -H 'Content-Type: application/json' --data-binary @- \"$SLACK_WEBHOOK_URL\""
 
-# OpenClaw agent turn (see skills/whatsapp-monitor/SKILL.md for the full onboarding pattern)
-"command": "openclaw agent --agent <main-agent-id> --session-id wa-monitor --message \"$(cat)\""
+# OpenClaw agent turn (daily-rolling session + first-use priming — see
+# skills/whatsapp-monitor/SKILL.md for the full onboarding, including the
+# ~/.whatsapp-monitor/forward.sh script this points at)
+"command": "~/.whatsapp-monitor/forward.sh"
 
-# Only ping on group messages
-"command": "[ \"$WAM_IS_GROUP\" = \"true\" ] && openclaw agent --session-id wa-monitor --message \"$(cat)\" || true"
+# Only ping on group messages (one-liner; no rolling/priming)
+"command": "[ \"$WAM_IS_GROUP\" = \"true\" ] && openclaw agent --agent main --session-id wa-monitor --message \"$(cat)\" || true"
 ```
 
 > **Security**: `notify.command` runs as the user owning the service process, with full shell access. The config file is user-owned — treat it accordingly.
