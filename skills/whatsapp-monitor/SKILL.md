@@ -20,7 +20,7 @@ Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted 
 
 ## Full onboarding flow
 
-If the user asks you to set up WhatsApp monitoring, walk through **all seven steps (0 through 6)** in order. Don't skip ahead — each step depends on the previous. Ask explicit questions; don't guess the user's intent.
+If the user asks you to set up WhatsApp monitoring, walk through **all six steps (0 through 5)** in order. Don't skip ahead — each step depends on the previous. Ask explicit questions; don't guess the user's intent.
 
 ### Step 0 — Install the CLI
 
@@ -157,15 +157,17 @@ Make the brief specific. "Tell me if urgent" is too vague. Good briefs include: 
 
 Confirm the brief with the user before continuing: read it back to them and ask "does this match what you want?"
 
-### Step 4 — Pick the OpenClaw agent
+### Step 4 — Pick the OpenClaw agent and configure the `notify` block
 
-Ask the user which agent should handle these notifications:
+#### Pick the agent
+
+If the user's setup uses OpenClaw (the common case for this skill), ask:
 
 > "Which OpenClaw agent should handle WhatsApp notifications? If you have a 'main' agent with memory about your family/work context, that's usually the right choice — we'll use a dedicated daily session so it doesn't clutter your normal chat with it. If you're not sure, run `openclaw agent --help` and check which agents are configured."
 
-Let `<AGENT_ID>` be the user's answer. We'll use it in the next step.
+Let `<AGENT_ID>` be the user's answer. You'll plug it into the config below.
 
-### Step 5 — Configure the `notify` block and verify
+If the user is *not* using OpenClaw and plans to wire the notifier into a webhook, a log, or a custom script, skip the agent question — you'll use command mode below.
 
 #### Pick a notify mode
 
@@ -205,7 +207,7 @@ cat ~/.whatsapp-monitor/config.json
 Field-by-field:
 
 - **`kind`** — required for structured mode. Must be `"openclaw-agent"`.
-- **`agent`** — required when `kind` is set. The OpenClaw agent id (what you'd pass to `openclaw agent --agent <id>`). Ask the user; match Step 4.
+- **`agent`** — required when `kind` is set. The OpenClaw agent id (what you'd pass to `openclaw agent --agent <id>`). Use whatever the user answered in the "Pick the agent" question above.
 - **`sessionIdTemplate`** — the `--session-id` value, with substitutions applied at dispatch time. Default `"wa-monitor-{date}"`. Supported tokens:
   - `{date}` → local `YYYY-MM-DD` (daily rolling)
   - `{week}` → local `YYYY-Www` (weekly rolling, ISO week)
@@ -213,7 +215,7 @@ Field-by-field:
   - `{chatIdSlug}` → chat id with non-alphanumerics replaced by `_`, e.g. `1234567890_g_us`. Use this when you want one session per chat; don't use `{chatId}` directly — the `@` confuses some tools.
   - A fixed string with no tokens (e.g. `"wa-monitor"`) = one permanent session. Fine for low-volume setups.
 - **`behaviorFile`** — path to a markdown file (defaults to `~/.whatsapp-monitor/behavior.md`). The daemon reads it on every dispatch and prepends its contents + a `---` separator to the JSON payload before handing it to `openclaw agent --message`. Edits take effect on the very next batch; there's no priming state or cache.
-- **`quietPeriodSec`** — per-chat batching window (covered in Step 6). Default 30. `0` disables batching.
+- **`quietPeriodSec`** — per-chat batching window (covered in Step 5). Default 30. `0` disables batching.
 - **`timeoutSec`** — hard cap on how long `openclaw agent` can run per call. Default 120. After the timeout: SIGTERM, 2s grace, SIGKILL. `0` disables the timeout (not recommended).
 
 #### Write the config (command mode — alternative)
@@ -288,9 +290,9 @@ notify test (dry run)
 
 Exit code 0 means every step passed. Non-zero means at least one step failed — the `[fail]` line names which one (log append, spawn, non-zero exit, timeout). See Troubleshooting below.
 
-**What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end alert delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 6).
+**What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end alert delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 5).
 
-### Step 6 — Run the service under a process manager
+### Step 5 — Run the service under a process manager
 
 `whatsapp-monitor run` is a foreground process. If the user runs it in a shell, it dies when the shell closes. **Always** walk them through a process manager.
 
@@ -742,7 +744,7 @@ What each step removes:
 | `npm uninstall -g` | The `whatsapp-monitor` binary. |
 | `rm -rf ~/.whatsapp-monitor` | All state: Baileys auth (credentials), allowlist, behavior brief, notify log. |
 
-Step 4 is intentionally separate — users who plan to reinstall later should skip it so the allowlist, behavior brief, and linked-device state survive. Removing `~/.whatsapp-monitor` requires a full re-onboarding including `link`.
+The `rm -rf ~/.whatsapp-monitor` step is intentionally separate — users who plan to reinstall later should skip it so the allowlist, behavior brief, and linked-device state survive. Removing `~/.whatsapp-monitor` requires a full re-onboarding including `link`.
 
 ---
 
