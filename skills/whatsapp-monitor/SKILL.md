@@ -6,7 +6,7 @@ allowed-tools: Bash(whatsapp-monitor *), Bash(openclaw agent *), Bash(cat *), Ba
 
 # whatsapp-monitor Skill
 
-> **Requires whatsapp-monitor >= 1.3.0** (npm package `whatsapp-monitor`). If the installed version is older, Step 0 will tell you how to upgrade. Features below (structured `notify.kind`, `notify.timeoutSec`, clean shutdown, explicit `notify test` output) are all 1.3.0+.
+> **Requires the npm package `whatsapp-monitor`, latest version.** Step 0 confirms it's installed and up to date. The skill assumes features that have been added in recent releases (structured `notify.kind`, `notify.timeoutSec`, clean shutdown, explicit `notify test` output) — install or upgrade first if anything is missing.
 
 Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted chats are batched and handed to a configured notifier — either a structured `notify.kind: "openclaw-agent"` (first-class OpenClaw integration, no shell quoting) or a user-defined `notify.command` (arbitrary shell). This skill has everything needed to onboard a user and operate the service; you should not need to read other files.
 
@@ -22,22 +22,23 @@ Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted 
 
 If the user asks you to set up WhatsApp monitoring, walk through **all six steps (0 through 5)** in order. Don't skip ahead — each step depends on the previous. Ask explicit questions; don't guess the user's intent.
 
-### Step 0 — Install the CLI
+### Step 0 — Install or upgrade the CLI
 
-Check the user's install state. Every subsequent step calls `whatsapp-monitor`:
+Check what's installed locally vs. what's on npm:
 
 ```bash
 which whatsapp-monitor && whatsapp-monitor --version
+npm view whatsapp-monitor version    # latest published on npm
 ```
 
-Decide what to do based on the result:
+Decide what to do:
 
-- **Both succeed, version ≥ 1.3.0** → skip to Step 1.
-- **`which` fails (command not found)** → install it.
-- **Version < 1.3.0** → upgrade before proceeding. Earlier versions are missing the structured `notify.kind`, `notify.timeoutSec`, and the step-by-step `notify test` output this skill depends on. Run:
+- **Installed and matches the npm version** → skip to Step 1.
+- **`which` fails (command not found)** → install it (see below).
+- **Installed but older than npm `latest`** → upgrade. The skill assumes recent features and the simplest rule is "always install the latest." Run:
   ```bash
   npm install -g whatsapp-monitor@latest
-  whatsapp-monitor --version   # confirm >= 1.3.0
+  whatsapp-monitor --version    # confirm it now matches `npm view`
   ```
 
 Also verify Node.js itself: run `node --version` and confirm it's >= 18. If it isn't, stop and tell the user to upgrade Node before continuing — this tool won't run on older Node.
@@ -58,8 +59,8 @@ How to guide the user through the install depends on their Node setup:
 After any install or upgrade, re-verify:
 
 ```bash
-whatsapp-monitor --version   # must print 1.3.0 or newer
-whatsapp-monitor --help      # confirms the `run` and `notify` commands are present
+whatsapp-monitor --version    # should match `npm view whatsapp-monitor version`
+whatsapp-monitor --help       # confirms the `run` and `notify` commands are present
 ```
 
 If either still fails, stop. Don't move to Step 1 until both work — the rest of the skill assumes they do.
@@ -287,7 +288,7 @@ Prefer the structured-mode default (no `--deliver`) for the time-sensitive-vs-di
 whatsapp-monitor notify test
 ```
 
-Expected output for a healthy config (1.3.0+):
+Expected output for a healthy config on the latest CLI:
 
 ```
 notify test (dry run)
@@ -695,15 +696,16 @@ journalctl --user -u whatsapp-monitor -f   # logs
 
 ## Troubleshooting
 
-### Version mismatch — `whatsapp-monitor` older than 1.3.0
+### Version mismatch — installed `whatsapp-monitor` is behind npm `latest`
 
-Symptoms: `notify test` prints the old "Dispatching synthetic payload... / Done." output, or `notify.kind` is rejected, or `timeoutSec` is ignored.
+Symptoms: `notify test` prints the old "Dispatching synthetic payload... / Done." output, or `notify.kind` is rejected as unknown, or `timeoutSec` is ignored.
 
 Fix:
 
 ```bash
 npm install -g whatsapp-monitor@latest
-whatsapp-monitor --version   # must print 1.3.0 or newer
+whatsapp-monitor --version
+npm view whatsapp-monitor version    # should match the line above
 ```
 
 Restart the service after upgrading (launchd `unload`+`load`, or `systemctl --user restart whatsapp-monitor`).
@@ -733,17 +735,17 @@ The `[fail]` line names the failing step. In order of what it might be:
 - **`child timed out after ...`** — the child ran longer than `notify.timeoutSec`. Either its work is actually slow (raise `timeoutSec`), or it's hung (investigate the child — OpenClaw gateway stuck, Telegram API not responding, etc.).
 - **`child exited: code=<nonzero>`** — the command ran but failed. The stderr preview usually explains why.
 
-### launchd/systemd: lingering children on stop (1.3.0+ should have fixed this)
+### launchd/systemd: lingering children on stop
 
 Symptoms: `launchctl unload` or `systemctl stop` takes the full stop-timeout before succeeding, journal shows `SIGKILL after timeout` or `status=143`, and/or orphaned `sh -c openclaw ...` processes persist.
 
-If you're on 1.3.0+ and this still happens, check:
+If you're on the latest CLI and this still happens, check:
 
 - `notify.timeoutSec` is not `0` (child runtime is unbounded).
 - The behavior brief doesn't make the agent start long-running background work that outlives the turn.
 - `launchctl list | grep whatsapp` / `pgrep -af whatsapp-monitor` to see what's still around.
 
-1.3.0 sends SIGTERM to in-flight children on shutdown and waits up to 5 seconds before SIGKILL. If you need more headroom, set `TimeoutStopSec=15` (systemd) or accept launchd's default.
+The CLI sends SIGTERM to in-flight children on shutdown and waits up to 5 seconds before SIGKILL. If you need more headroom, set `TimeoutStopSec=15` (systemd) or accept launchd's default. (If lingering children persist on the latest CLI, you may have hit a regression — confirm the installed version with `whatsapp-monitor --version` and `npm view whatsapp-monitor version` before deeper debugging.)
 
 ### PATH issues inside launchd/systemd
 
@@ -808,6 +810,6 @@ The `rm -rf ~/.whatsapp-monitor` step is intentionally separate — users who pl
 ## Prerequisites
 
 - Node.js >= 18 (`node --version`).
-- `whatsapp-monitor` >= 1.3.0 on `PATH` (see Step 0).
+- `whatsapp-monitor` on `PATH`, latest npm version (see Step 0).
 - For OpenClaw integration: `openclaw` CLI installed and reachable on `PATH` for the service user — including inside launchd/systemd (see process-manager notes above).
 - At least one chat in the allowlist (Step 2) before `run` will start.
