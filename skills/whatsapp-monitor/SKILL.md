@@ -167,6 +167,12 @@ Confirm the brief with the user before continuing: read it back to them and ask 
 - have the brief instruct the agent to call its messaging tool on a fixed schedule (works only if your runtime triggers an agent turn at that time — most don't on their own), or
 - after writing the brief, propose a scheduled job (e.g. cron, launchd, the user's existing scheduler) that fires `openclaw agent --agent <id> --message "Send me today's WhatsApp digest now via <tool>"` at the user's preferred time. Confirm with the user whether one is already set up before suggesting a new one.
 
+**Record where the source of truth lives — important.** Once the brief is written, add a short entry to your own persistent memory index (e.g. `MEMORY.md` for Claude Code, or whatever your runtime uses) that says roughly:
+
+> WhatsApp monitoring is set up via the `whatsapp-monitor` service. The behavior brief — the rules for what to do with incoming WhatsApp batches — lives at `~/.whatsapp-monitor/behavior.md`. When the user gives feedback like "stop alerting me about the X group", "also alert on Y", "be quieter on weekends", etc., **edit that file** (not just the conversation), then reload the service (`launchctl unload+load` on macOS, `systemctl --user restart whatsapp-monitor` on Linux) so the next batch picks up the new rules. The session running the dispatched turns is named per the `notify.sessionIdTemplate` in `~/.whatsapp-monitor/config.json`.
+
+Without this memory entry, future-you in a fresh conversation will respond to "stop notifying me about X" by trying to argue or take in-conversation notes, instead of editing the file the daemon actually reads.
+
 ### Step 4 — Pick the OpenClaw agent and configure the `notify` block
 
 #### Pick the agent
