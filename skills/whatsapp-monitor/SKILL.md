@@ -18,7 +18,40 @@ Read-only monitoring of the user's WhatsApp. Incoming messages from allowlisted 
 
 ## Full onboarding flow
 
-If the user asks you to set up WhatsApp monitoring, walk through **all six steps** in order. Don't skip ahead — each step depends on the previous. Ask explicit questions; don't guess the user's intent.
+If the user asks you to set up WhatsApp monitoring, walk through **all seven steps (0 through 6)** in order. Don't skip ahead — each step depends on the previous. Ask explicit questions; don't guess the user's intent.
+
+### Step 0 — Install the CLI
+
+Before anything else, confirm `whatsapp-monitor` is on the user's `PATH`. Every subsequent step calls it.
+
+```bash
+which whatsapp-monitor && whatsapp-monitor --version
+```
+
+- If both succeed and the version is `1.2.0` or newer → skip to Step 1.
+- If `which` fails (command not found) → install it (see below).
+- If the version is older than `1.2.0` → upgrade it (`npm install -g whatsapp-monitor@latest`). The service-style `run` command and the `notify.command` pipeline this skill depends on were added in `1.2.0`.
+
+**Install command (canonical):**
+
+```bash
+npm install -g whatsapp-monitor
+```
+
+Notes for the agent:
+
+- On macOS with Homebrew Node or any user-managed Node (nvm, fnm, volta), this works without `sudo`.
+- On macOS/Linux with system Node, the global install directory may be root-owned; the user will see `EACCES`. **Do not run `sudo npm install -g ...` for them** — tell the user to either (a) switch to a user-managed Node (`brew install node` or install nvm), or (b) run `sudo npm install -g whatsapp-monitor` themselves in their terminal. Don't silently install it as root; it creates PATH and ownership pain later.
+- Prerequisite: Node.js >= 18. If `node --version` shows < 18, stop and tell the user to upgrade Node first.
+
+Verify the install:
+
+```bash
+whatsapp-monitor --version   # should print 1.2.0 (or newer)
+whatsapp-monitor --help      # confirms the `run` and `notify` commands are present
+```
+
+If either fails, do not proceed to Step 1. Debug the install first.
 
 ### Step 1 — Link WhatsApp (user must do this themselves in a terminal)
 
@@ -496,6 +529,7 @@ journalctl --user -u whatsapp-monitor -f   # logs
 
 ## Prerequisites
 
-- Node.js >= 18 and `whatsapp-monitor` installed (`npm install -g whatsapp-monitor`).
+- Node.js >= 18 (`node --version`).
+- `whatsapp-monitor` >= 1.2.0 on `PATH` (see Step 0).
 - For OpenClaw integration: `openclaw` CLI installed and reachable on `PATH` for the service user — including inside launchd/systemd (see process-manager notes above).
 - At least one chat in the allowlist (Step 2) before `run` will start.
