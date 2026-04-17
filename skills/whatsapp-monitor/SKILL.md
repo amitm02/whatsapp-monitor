@@ -161,7 +161,30 @@ If the inline shell is too cramped to edit comfortably, a two-line variant is eq
 "command": "PAYLOAD=\"$(cat)\"; openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --message \"$(cat ~/.whatsapp-monitor/behavior.md)\n\n---\n\n$PAYLOAD\""
 ```
 
-Test the pipeline before real messages start arriving:
+#### Where does the agent's reply go?
+
+By default, `openclaw agent` **prints its reply to stdout and does not deliver it anywhere**. With `notify.command` as above, the agent's response lands in the `whatsapp-monitor` service log (launchd/systemd stdout) — the user never sees it. That's the behavior you want: silent by default, the agent decides when to alert the user.
+
+**When the agent needs to reach the user, it must initiate that itself** — by calling one of its own configured messaging tools (Slack, Telegram, Discord, whatever). The behavior brief should say "call your Slack tool / Telegram tool to notify me," not "reply to me," so the agent doesn't think printing a reply is enough.
+
+If instead you want **every batch auto-delivered to a channel as an OpenClaw reply** (unusual, but valid for simple "forward everything" setups), add `--deliver` plus delivery flags to the command:
+
+| Flag | Purpose |
+|---|---|
+| `--deliver` | Turn delivery on. Without this, the reply is stdout-only. |
+| `--reply-channel <name>` | Channel to deliver into: `telegram`, `slack`, `discord`, etc. |
+| `--reply-to <target>` | Where inside the channel (a chat id, `#channel`, `@user`). Format depends on the channel — check `openclaw agent --help` or the channel's docs. |
+| `--reply-account <id>` | Which configured account in that channel (multi-account setups). |
+
+Example always-deliver variant:
+
+```json
+"command": "openclaw agent --agent <AGENT_ID> --session-id \"wa-monitor-$(date +%F)\" --deliver --reply-channel telegram --reply-to <your-telegram-chat-id> --message \"$(printf '%s\\n\\n---\\n\\n' \"$(cat ~/.whatsapp-monitor/behavior.md)\")$(cat)\""
+```
+
+Prefer the default (no `--deliver`) for the time-sensitive-vs-digest pattern. The agent's tool-calling gives finer-grained control than `--deliver` can — "alert only if urgent" is the agent's judgment call, not a daemon-level always-on flag.
+
+#### Test the pipeline
 
 ```bash
 whatsapp-monitor notify test
@@ -316,6 +339,8 @@ There are no markers or priming state to clean up when you change cadence — ju
 
 Drop one of these into `~/.whatsapp-monitor/behavior.md` (or adapt to the user's actual preference) in Step 3.
 
+> **Important phrasing note**: the agent's textual reply to `openclaw agent --message ...` goes to the service log, not to the user. When the brief says "notify me" or "alert me," the agent must call one of its own configured messaging tools (Slack, Telegram, etc.) to reach the user — a plain reply is invisible. Phrase alert instructions as **"call your <Slack/Telegram/whatever> tool"** so the agent doesn't assume its reply is enough.
+
 **Example A — time-sensitive vs digest** (the original motivating case):
 
 ```markdown
@@ -333,11 +358,11 @@ For each batch of messages that arrives in this session:
 
    Everything else is non-urgent.
 
-2. If **urgent**: send me a short alert in my normal channel right now, one or two sentences summarizing what's going on and from whom.
+2. If **urgent**: call your Telegram tool (or whichever messaging tool reaches me) to send a short alert right now — one or two sentences summarizing what's going on and from whom. Do NOT rely on your text reply alone; it goes to a log, not to me.
 
-3. If **non-urgent**: silently add a one-line entry to an end-of-day digest (a memory note, not a message). At the end of the day, if I ask for "my WhatsApp digest", summarize what accumulated.
+3. If **non-urgent**: silently add a one-line entry to an end-of-day digest (a memory note, not a message). At the end of the day, if I ask for "my WhatsApp digest", recall and summarize what accumulated.
 
-4. Never reply to WhatsApp itself — you have no send capability on that account.
+4. Never try to reply back to WhatsApp — you have no send capability on that account.
 ```
 
 **Example B — keyword alert only:**
@@ -345,9 +370,9 @@ For each batch of messages that arrives in this session:
 ```markdown
 # whatsapp-monitor behavior
 
-Only notify me when a message mentions any of: my name "Amit", "tomorrow", "urgent", or "kids". For any such message, send a short alert in my normal channel.
+Only act when a message mentions any of: my name "Amit", "tomorrow", "urgent", or "kids". For any such batch, call your Telegram tool to send me a short alert.
 
-For everything else, do nothing. Don't log, don't summarize, don't respond in this session.
+For everything else, do nothing — don't log, don't summarize, don't call any tool. Your text reply in this session goes to a log I never read, so silence is fine.
 ```
 
 **Example C — silent memory only:**
@@ -355,7 +380,7 @@ For everything else, do nothing. Don't log, don't summarize, don't respond in th
 ```markdown
 # whatsapp-monitor behavior
 
-Do not proactively message me about WhatsApp batches. For every batch, write a short memory note so you can reference it later if I ask. When I do ask "what was on WhatsApp?" or similar, recall and summarize from those notes.
+Do not proactively contact me about WhatsApp batches. For every batch, write a short memory note so you can reference it later when I ask. When I do ask "what was on WhatsApp?" or similar (in our normal chat, not this session), recall and summarize from those notes.
 ```
 
 ### Filtering before the agent sees the payload
