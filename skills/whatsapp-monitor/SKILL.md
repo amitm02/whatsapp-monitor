@@ -161,6 +161,11 @@ Make the brief specific. "Tell me if urgent" is too vague. Good briefs include: 
 
 Confirm the brief with the user before continuing: read it back to them and ask "does this match what you want?"
 
+**If the brief involves a digest or summary:** active delivery beats passive recall. Don't write briefs that wait for the user to ask "what was on WhatsApp today?" — that depends on the user remembering, which defeats the point of accumulating one. Either:
+
+- have the brief instruct the agent to call its messaging tool on a fixed schedule (works only if your runtime triggers an agent turn at that time — most don't on their own), or
+- after writing the brief, propose a scheduled job (e.g. cron, launchd, the user's existing scheduler) that fires `openclaw agent --agent <id> --message "Send me today's WhatsApp digest now via <tool>"` at the user's preferred time. Confirm with the user whether one is already set up before suggesting a new one.
+
 ### Step 4 — Pick the OpenClaw agent and configure the `notify` block
 
 #### Pick the agent
@@ -532,9 +537,11 @@ For each batch of messages that arrives in this session:
 
 2. If **urgent**: call your Telegram tool (or whichever messaging tool reaches me) to send a short alert right now — one or two sentences summarizing what's going on and from whom. Do NOT rely on your text reply alone; it goes to a log, not to me.
 
-3. If **non-urgent**: silently add a one-line entry to an end-of-day digest (a memory note, not a message). At the end of the day, if I ask for "my WhatsApp digest", recall and summarize what accumulated.
+3. If **non-urgent**: silently append a one-line entry to a memory note named "WhatsApp digest — YYYY-MM-DD" (one note per local day; create it on the first non-urgent batch of the day). Do not message me about it.
 
 4. Never try to reply back to WhatsApp — you have no send capability on that account.
+
+**End-of-day delivery (active):** the digest should reach me on its own each evening, not wait for me to ask. If a scheduled job doesn't already do this for me, suggest one now — for example, a cron entry that runs `openclaw agent --agent <my-agent> --message "Send me today's WhatsApp digest now via my Telegram tool"` at 21:00 local time. Confirm with me whether it's already set up before assuming.
 ```
 
 **Example B — keyword alert only:**
