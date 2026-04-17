@@ -165,17 +165,26 @@ Ask the user which agent should handle these notifications:
 
 Let `<AGENT_ID>` be the user's answer. We'll use it in the next step.
 
-### Step 5 — Configure the `notify` block (structured mode) and verify
+### Step 5 — Configure the `notify` block and verify
 
-Use the first-class **structured** mode for OpenClaw integration — no shell quoting, the daemon handles session rolling, behavior-brief loading, and argv assembly internally. It also gives you `timeoutSec` protection against a hung `openclaw agent` call.
+#### Pick a notify mode
 
-Edit `~/.whatsapp-monitor/config.json` to add the `notify` block. Read the existing config first and merge — don't clobber `allowedGroups` or `authDir`:
+`whatsapp-monitor` has **two mutually-exclusive notify modes**. You pick one by setting exactly one of `notify.kind` or `notify.command` in `~/.whatsapp-monitor/config.json`. Setting both is a config error.
+
+| Mode | Selected by | What the daemon does with each batched payload | Use for |
+|---|---|---|---|
+| **Structured** | `notify.kind: "openclaw-agent"` | Calls `spawn("openclaw", ["agent", "--agent", …, "--session-id", …, "--message", brief + "\n\n---\n\n" + payloadJson])` directly. No shell. No quoting. `behaviorFile` is read fresh each call. | The OpenClaw setup this skill is built around. Also the only mode that gives you `timeoutSec` without writing shell yourself. |
+| **Command** | `notify.command: "<shell string>"` | Runs `sh -c "<your command>"`, writes the JSON payload to the child's stdin, exposes a few `WAM_*` env vars. Whatever the command does with the payload is your business. | Webhooks, logs, custom scripts, or OpenClaw with flags the structured mode doesn't expose (e.g. `--deliver`). |
+
+**Today `kind` has exactly one legal value: `"openclaw-agent"`.** Any other value is rejected at config load. The field exists so new structured integrations (e.g. `"kind": "webhook"` in some future version) can be added without breaking anyone's config. If you're not setting up OpenClaw, use `notify.command`.
+
+#### Write the config (structured mode)
+
+Use this mode for the OpenClaw flow the skill is built around. Edit `~/.whatsapp-monitor/config.json` — read it first and merge; don't clobber `allowedGroups` or `authDir`:
 
 ```bash
 cat ~/.whatsapp-monitor/config.json
 ```
-
-Write a merged config like this (substitute the real `<AGENT_ID>`):
 
 ```json
 {
@@ -193,15 +202,37 @@ Write a merged config like this (substitute the real `<AGENT_ID>`):
 }
 ```
 
-What each field does:
+Field-by-field:
 
-- `kind: "openclaw-agent"` selects the structured OpenClaw dispatcher. Runs `openclaw agent` directly via `spawn` — no shell, no quoting.
-- `agent` — which OpenClaw agent handles the turn.
-- `sessionIdTemplate` — supports `{date}` → `YYYY-MM-DD`, `{week}` → `YYYY-Www`, `{chatId}`, `{chatIdSlug}`. Default is `wa-monitor-{date}` (daily rolling). Use `wa-monitor` (no substitution) for a single persistent session, or `wa-monitor-{chatIdSlug}` to isolate per-chat.
-- `behaviorFile` — the daemon prepends this file's contents (plus a `---` separator) to the JSON payload for every dispatch. Re-read on every call so edits to the brief take effect immediately. No priming state to manage.
-- `timeoutSec` — hard cap on how long `openclaw agent` can run per call. SIGTERM then SIGKILL. Default 120.
+- **`kind`** — required for structured mode. Must be `"openclaw-agent"`.
+- **`agent`** — required when `kind` is set. The OpenClaw agent id (what you'd pass to `openclaw agent --agent <id>`). Ask the user; match Step 4.
+- **`sessionIdTemplate`** — the `--session-id` value, with substitutions applied at dispatch time. Default `"wa-monitor-{date}"`. Supported tokens:
+  - `{date}` → local `YYYY-MM-DD` (daily rolling)
+  - `{week}` → local `YYYY-Www` (weekly rolling, ISO week)
+  - `{chatId}` → literal chat id, e.g. `1234567890@g.us`
+  - `{chatIdSlug}` → chat id with non-alphanumerics replaced by `_`, e.g. `1234567890_g_us`. Use this when you want one session per chat; don't use `{chatId}` directly — the `@` confuses some tools.
+  - A fixed string with no tokens (e.g. `"wa-monitor"`) = one permanent session. Fine for low-volume setups.
+- **`behaviorFile`** — path to a markdown file (defaults to `~/.whatsapp-monitor/behavior.md`). The daemon reads it on every dispatch and prepends its contents + a `---` separator to the JSON payload before handing it to `openclaw agent --message`. Edits take effect on the very next batch; there's no priming state or cache.
+- **`quietPeriodSec`** — per-chat batching window (covered in Step 6). Default 30. `0` disables batching.
+- **`timeoutSec`** — hard cap on how long `openclaw agent` can run per call. Default 120. After the timeout: SIGTERM, 2s grace, SIGKILL. `0` disables the timeout (not recommended).
 
-If the user wants something that isn't OpenClaw (webhook, log-only, custom script), use `notify.command` instead — see the Reference section below. The two modes are mutually exclusive; setting both is a config error.
+#### Write the config (command mode — alternative)
+
+If the user wants something that isn't structured OpenClaw — a webhook, a log-only pipeline, a custom script, or OpenClaw invoked with flags like `--deliver` — use `notify.command` instead:
+
+```json
+{
+  "notify": {
+    "command": "tee -a ~/whatsapp-digest.jsonl",
+    "quietPeriodSec": 30,
+    "timeoutSec": 120
+  }
+}
+```
+
+The daemon will `sh -c` the string for every batch. See the Reference section below for the payload shape, env vars, and more recipes.
+
+Reminder: setting both `kind` and `command` in the same `notify` block is rejected as a config error — pick one.
 
 #### Where does the agent's reply go?
 
