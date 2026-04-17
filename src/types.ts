@@ -1,9 +1,28 @@
 import type { proto } from '@whiskeysockets/baileys'
 
+export interface NotifyConfig {
+  command?: string
+  quietPeriodSec?: number
+  logFile?: string
+  maxBufferedPerChat?: number
+}
+
 export interface MonitorConfig {
   allowedGroups: string[]
   allowedContacts: string[]
   authDir: string
+  notify?: NotifyConfig
+}
+
+export interface NotificationPayload {
+  chatId: string
+  chatName?: string
+  isGroup: boolean
+  firstTimestamp: number
+  lastTimestamp: number
+  messageCount: number
+  senderCount: number
+  messages: MonitorMessage[]
 }
 
 export interface GroupInfo {

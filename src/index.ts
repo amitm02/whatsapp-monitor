@@ -7,12 +7,16 @@ export {
   isAllowed,
   getConfigPath,
   getConfigDir,
+  resolveNotifyDefaults,
   CONFIG_DIR,
   CONFIG_FILE,
   DEFAULT_AUTH_DIR,
+  DEFAULT_NOTIFY_LOG,
 } from './config.js'
 export type {
   MonitorConfig,
+  NotifyConfig,
+  NotificationPayload,
   GroupInfo,
   ContactInfo,
   GroupMetadata,

@@ -1,50 +1,48 @@
 # WhatsApp Monitor
 
-A read-only WhatsApp monitoring tool using Baileys.
+A read-only WhatsApp **monitoring service** using Baileys. Runs as a persistent listener and hands batched notifications to a configurable shell command (webhook, `openclaw agent`, log, etc.).
 
-> **Note for OpenClaw agents**: This tool is **not** the same as the WhatsApp channel used to communicate with the AI agent. This is a separate tool for monitoring external WhatsApp chats (e.g., the user's personal WhatsApp groups). It has its own independent authentication and linking process. For example, if OpenClaw has its own WhatsApp number for user communication, you can still use this tool to monitor specific groups on the user's personal WhatsApp account.
+> This is **monitoring**, not a chat channel. It surfaces messages from an external WhatsApp account *into* another tool. It cannot send.
 >
-> Why use this instead of the OpenClaw WhatsApp channel?
-> 1. **Different purpose**: The channel is for messaging the AI, not monitoring external chats
-> 2. **Silent read-only access**: This tool provides proper read-only monitoring without presence indicators
-> 3. **Safety**: The CLI has no send capability, significantly reducing the risk of the agent accidentally sending messages to monitored chats
+> **Note for OpenClaw agents**: `@openclaw/whatsapp` is a bidirectional *channel* — how a user talks to the agent. This tool is a one-way *input*: it observes a separate (typically personal) WhatsApp account read-only, so the agent can react without being able to send from that account.
 
 ## Project Structure
 
-- `src/client.ts` - WhatsApp client wrapper (read-only, no send methods)
-- `src/config.ts` - Configuration management (~/.whatsapp-monitor/config.json)
-- `src/types.ts` - TypeScript interfaces
-- `src/cli/` - Commander CLI implementation
+- `src/client.ts` — WhatsApp client wrapper (read-only, no send methods)
+- `src/config.ts` — Configuration management (`~/.whatsapp-monitor/config.json`)
+- `src/types.ts` — TypeScript interfaces
+- `src/notifier.ts` — Per-chat quiet-period buffering (pure; no Baileys dep)
+- `src/dispatcher.ts` — Spawns `notify.command`, writes JSON to stdin, appends to JSONL log
+- `src/cli/commands/run.ts` — The `run` command (persistent listener)
+- `src/cli/commands/notify.ts` — The `notify test` command
+- `src/cli/` — Commander CLI implementation
+- `skills/whatsapp-monitor/SKILL.md` — Agent-facing onboarding + operations skill (self-contained)
 
 ## Security Design
 
-1. **Read-only**: The client intentionally does NOT expose any Baileys send methods
-2. **Allowlist filtering**: Messages filtered at library level before reaching callers
-3. **Local config**: Allowlist stored in local config file, not passed as parameters
+1. **Read-only**: the client does NOT expose any Baileys send methods.
+2. **Allowlist filtering**: messages filtered at library level before reaching callers. `run` refuses to start with an empty allowlist.
+3. **Local config**: allowlist and `notify.command` stored in a user-owned file, not passed as parameters.
+4. `notify.command` runs with full shell access as the service user; docs call this out.
 
 ## CLI Commands
 
 ```bash
-whatsapp-monitor link              # QR code linking (scan with phone)
-whatsapp-monitor link --phone 12345678901  # Pairing code linking (enter code on phone)
-whatsapp-monitor groups            # List all groups with IDs and participant counts
-whatsapp-monitor groups --json     # Output groups as JSON
-whatsapp-monitor groups -v         # List groups with debug output
-whatsapp-monitor events            # Stream all raw Baileys events (for debugging)
-whatsapp-monitor events --idle 10  # Use 10s idle timeout (default: 10)
-whatsapp-monitor events --timeout 60 # Max timeout (default: 60)
-whatsapp-monitor config list       # Show current allowlist
-whatsapp-monitor config add <id>   # Add to allowlist
-whatsapp-monitor config remove <id> # Remove from allowlist
-whatsapp-monitor messages          # Stream queued messages then exit (5s idle timeout)
-whatsapp-monitor messages --idle 10 # Use 10s idle timeout
-whatsapp-monitor messages -f       # Follow mode: keep monitoring for new messages
-whatsapp-monitor messages -a       # Show all messages (bypass allowlist)
-whatsapp-monitor messages --json   # Output as JSON
-whatsapp-monitor messages --queued-only # Exit immediately after queued messages
-whatsapp-monitor messages --timeout 120 # Safety timeout (default: 120)
-whatsapp-monitor reset             # Reset authentication state
-whatsapp-monitor reset -y          # Reset without confirmation prompt
+whatsapp-monitor run                 # Persistent listener (primary). Requires allowlist.
+whatsapp-monitor run -v              # Verbose
+whatsapp-monitor run --no-notify     # Skip notify.command; still write JSONL log
+whatsapp-monitor notify test         # Fire one synthetic payload through notify.command
+whatsapp-monitor link                # QR code linking (default, interactive)
+whatsapp-monitor link --code --phone 12345678901
+whatsapp-monitor link --name "My Bot"
+whatsapp-monitor link --reset
+whatsapp-monitor groups              # List groups with IDs
+whatsapp-monitor groups --json
+whatsapp-monitor config list|add <id>|remove <id>
+whatsapp-monitor reset [-y]          # Reset auth (requires re-linking)
+# Debugging / inspection:
+whatsapp-monitor messages [-f|-a|--json|--queued-only|--idle N|--timeout N]
+whatsapp-monitor events [--idle N|--timeout N]
 ```
 
 ## Building
@@ -62,21 +60,35 @@ Config stored at `~/.whatsapp-monitor/config.json`:
 {
   "allowedGroups": ["123@g.us"],
   "allowedContacts": ["123@s.whatsapp.net"],
-  "authDir": "~/.whatsapp-monitor/auth"
+  "authDir": "~/.whatsapp-monitor/auth",
+  "notify": {
+    "command": "openclaw agent --session-id wa-monitor --message \"$(cat)\"",
+    "quietPeriodSec": 120,
+    "logFile": "~/.whatsapp-monitor/notifications.jsonl",
+    "maxBufferedPerChat": 50
+  }
 }
 ```
 
-## Queued Messages Behavior
+### `notify.command` contract
 
-When connecting, WhatsApp syncs messages that arrived while offline. These are delivered via `messages.upsert` with `type: "append"` (queued), while real-time messages have `type: "notify"`.
+- Invoked via `sh -c` for every batched notification.
+- JSON payload written to child **stdin** (see `NotificationPayload` in `src/types.ts`).
+- Convenience env vars: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP`, `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`.
+- Each payload is also appended to `logFile` regardless of command outcome (durable record).
+- Non-zero exits are logged but don't crash the service. Invocations are serialized per chat.
 
-**Important limitations**:
-- WhatsApp does NOT guarantee all offline messages will be synced
-- Messages may be lost during reconnection (especially after 408 timeout)
-- Server-side retention is limited; old messages may not sync
-- 14 days of phone inactivity logs out linked devices
+## Throttling
 
-The `--queued-only` flag exits immediately after initial sync. Without `-f`, the command waits for the idle timeout after sync completes. Use `-f` for reliable real-time monitoring.
+Per-chat quiet-period flush: buffer inbound messages; flush one batched payload after `quietPeriodSec` of no new messages in that chat. Default 120s. `0` disables batching (one payload per message).
+
+## Service lifecycle
+
+The service is a foreground process. Use `launchd` / `systemd` / `pm2` to keep it running. See README for copy-pasteable snippets. `run` handles SIGINT/SIGTERM with a flush.
+
+## Queued Messages Behavior (one-shot `messages` command)
+
+`messages` (the legacy debug command) fetches whatever WhatsApp syncs on connect (`messages.upsert` with `type: "append"`). WhatsApp does **not** guarantee all offline messages will sync, so don't rely on it for capture. Use `run` under a process manager.
 
 ## Library Usage
 

@@ -2,16 +2,46 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
-import type { MonitorConfig } from './types.js'
+import type { MonitorConfig, NotifyConfig } from './types.js'
 
 const CONFIG_DIR = join(homedir(), '.whatsapp-monitor')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const DEFAULT_AUTH_DIR = join(CONFIG_DIR, 'auth')
+const DEFAULT_NOTIFY_LOG = join(CONFIG_DIR, 'notifications.jsonl')
+const DEFAULT_QUIET_PERIOD_SEC = 120
+const DEFAULT_MAX_BUFFERED_PER_CHAT = 50
 
 const DEFAULT_CONFIG: MonitorConfig = {
   allowedGroups: [],
   allowedContacts: [],
   authDir: DEFAULT_AUTH_DIR,
+}
+
+function normalizeNotify(input: Partial<NotifyConfig> | undefined): NotifyConfig | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const notify: NotifyConfig = {}
+  if (typeof input.command === 'string' && input.command.trim() !== '') {
+    notify.command = input.command
+  }
+  if (typeof input.quietPeriodSec === 'number' && input.quietPeriodSec >= 0) {
+    notify.quietPeriodSec = input.quietPeriodSec
+  }
+  if (typeof input.logFile === 'string' && input.logFile.trim() !== '') {
+    notify.logFile = input.logFile
+  }
+  if (typeof input.maxBufferedPerChat === 'number' && input.maxBufferedPerChat > 0) {
+    notify.maxBufferedPerChat = input.maxBufferedPerChat
+  }
+  return Object.keys(notify).length > 0 ? notify : undefined
+}
+
+export function resolveNotifyDefaults(notify: NotifyConfig | undefined): Required<NotifyConfig> {
+  return {
+    command: notify?.command ?? '',
+    quietPeriodSec: notify?.quietPeriodSec ?? DEFAULT_QUIET_PERIOD_SEC,
+    logFile: notify?.logFile ?? DEFAULT_NOTIFY_LOG,
+    maxBufferedPerChat: notify?.maxBufferedPerChat ?? DEFAULT_MAX_BUFFERED_PER_CHAT,
+  }
 }
 
 export async function loadConfig(): Promise<MonitorConfig> {
@@ -25,6 +55,7 @@ export async function loadConfig(): Promise<MonitorConfig> {
       allowedGroups: parsed.allowedGroups ?? [],
       allowedContacts: parsed.allowedContacts ?? [],
       authDir: parsed.authDir ?? DEFAULT_AUTH_DIR,
+      notify: normalizeNotify(parsed.notify),
     }
   } catch {
     return { ...DEFAULT_CONFIG }
@@ -89,4 +120,8 @@ export function getConfigDir(): string {
   return CONFIG_DIR
 }
 
-export { CONFIG_DIR, CONFIG_FILE, DEFAULT_AUTH_DIR }
+export function hasExistingAuth(authDir: string = DEFAULT_AUTH_DIR): boolean {
+  return existsSync(join(authDir, 'creds.json'))
+}
+
+export { CONFIG_DIR, CONFIG_FILE, DEFAULT_AUTH_DIR, DEFAULT_NOTIFY_LOG }
