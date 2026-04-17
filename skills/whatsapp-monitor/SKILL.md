@@ -24,41 +24,45 @@ If the user asks you to set up WhatsApp monitoring, walk through **all six steps
 
 ### Step 0 — Install the CLI
 
-Before anything else, confirm `whatsapp-monitor` is on the user's `PATH`. Every subsequent step calls it.
+Check the user's install state. Every subsequent step calls `whatsapp-monitor`:
 
 ```bash
 which whatsapp-monitor && whatsapp-monitor --version
 ```
 
-- If both succeed and the version is `1.3.0` or newer → skip to Step 1.
-- If `which` fails (command not found) → install it (see below).
-- If the version is older than `1.3.0` → **upgrade, don't proceed**. Earlier versions are missing the structured `notify.kind`, `notify.timeoutSec`, and the step-by-step `notify test` output this skill depends on. Run:
+Decide what to do based on the result:
 
+- **Both succeed, version ≥ 1.3.0** → skip to Step 1.
+- **`which` fails (command not found)** → install it.
+- **Version < 1.3.0** → upgrade before proceeding. Earlier versions are missing the structured `notify.kind`, `notify.timeoutSec`, and the step-by-step `notify test` output this skill depends on. Run:
   ```bash
   npm install -g whatsapp-monitor@latest
   whatsapp-monitor --version   # confirm >= 1.3.0
   ```
 
-**Install command (canonical):**
+Also verify Node.js itself: run `node --version` and confirm it's >= 18. If it isn't, stop and tell the user to upgrade Node before continuing — this tool won't run on older Node.
+
+**Install command (when the user needs it):**
 
 ```bash
 npm install -g whatsapp-monitor
 ```
 
-Notes for the agent:
+How to guide the user through the install depends on their Node setup:
 
-- On macOS with Homebrew Node or any user-managed Node (nvm, fnm, volta), this works without `sudo`.
-- On macOS/Linux with system Node, the global install directory may be root-owned; the user will see `EACCES`. **Do not run `sudo npm install -g ...` for them** — tell the user to either (a) switch to a user-managed Node (`brew install node` or install nvm), or (b) run `sudo npm install -g whatsapp-monitor` themselves in their terminal. Don't silently install it as root; it creates PATH and ownership pain later.
-- Prerequisite: Node.js >= 18. If `node --version` shows < 18, stop and tell the user to upgrade Node first.
+- **User-managed Node (Homebrew, nvm, fnm, volta, etc.)**: the command above works without `sudo`. You can suggest the user run it, or run it yourself if you have shell access and the user has explicitly authorized it.
+- **System Node (macOS/Linux default)**: the global install directory is usually root-owned and the user will see `EACCES`. Do **not** run `sudo npm install -g ...` yourself. Two options, in order of preference:
+  1. Ask the user to switch to a user-managed Node (`brew install node`, or install nvm). This avoids sudo entirely and makes future upgrades painless.
+  2. If the user insists, they can run `sudo npm install -g whatsapp-monitor` themselves in their terminal. Flag one footgun before they do: the resulting binary lives under a root-owned path, so if their shell's `PATH` doesn't include that path, `which whatsapp-monitor` will still fail afterwards. If that happens, have them add it to `PATH` or use the full path.
 
-Verify the install:
+After any install or upgrade, re-verify:
 
 ```bash
 whatsapp-monitor --version   # must print 1.3.0 or newer
 whatsapp-monitor --help      # confirms the `run` and `notify` commands are present
 ```
 
-If either fails, do not proceed to Step 1. Debug the install first.
+If either still fails, stop. Don't move to Step 1 until both work — the rest of the skill assumes they do.
 
 ### Step 1 — Link WhatsApp (user must do this themselves in a terminal)
 
@@ -363,7 +367,7 @@ whatsapp-monitor run [-v] [--no-notify]
 | Option | Description |
 |---|---|
 | `-v, --verbose` | Log each message as it arrives |
-| `--no-notify` | Skip `notify.command`; still write to the JSONL log |
+| `--no-notify` | Skip the notifier (both `notify.command` and `notify.kind` are bypassed); still write to the JSONL log |
 
 Refuses to start if the allowlist is empty. Handles SIGINT/SIGTERM with a clean flush.
 
@@ -373,7 +377,7 @@ Refuses to start if the allowlist is empty. Handles SIGINT/SIGTERM with a clean 
 whatsapp-monitor notify test
 ```
 
-Fires one synthetic payload through `notify.command`. Use to verify wiring.
+Fires one synthetic payload through the configured notifier (`notify.command` or `notify.kind`). Use to verify wiring.
 
 ### Other commands
 
@@ -442,7 +446,10 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 
 ### Notification payload shape
 
-`notify.command` receives this JSON on stdin:
+The notifier produces a JSON payload with this shape for every batched dispatch:
+
+- In **command mode** it's written to the child's stdin.
+- In **structured mode** it's appended to the behavior brief (after a `---` separator) and passed as the `--message` argument to `openclaw agent`.
 
 ```jsonc
 {
@@ -471,23 +478,32 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 }
 ```
 
-Convenience env vars also set on the child: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP` (`"true"`/`"false"`), `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`.
+**Command mode only**: the child also gets these env vars set, handy for shell conditionals: `WAM_CHAT_ID`, `WAM_CHAT_NAME`, `WAM_IS_GROUP` (`"true"`/`"false"`), `WAM_MESSAGE_COUNT`, `WAM_FIRST_TS`, `WAM_LAST_TS`. Structured mode doesn't need them — filtering logic belongs in the behavior brief.
 
 ### Session lifetime and rolling cadence
 
 OpenClaw sessions persist indefinitely on disk (`~/.openclaw/agents/<agent>/sessions/<session-id>.jsonl`) — there is no client-side expiry. Every turn includes prior context, so long sessions cost more per turn and carry old noise into new decisions. OpenClaw compacts automatically, but you still pay to re-summarize.
 
-The default recipe uses a **daily-rolling** session id — `wa-monitor-$(date +%F)` expands to `wa-monitor-2025-04-17` and rolls at local midnight. Each day starts fresh; the behavior brief is re-sent with every notification, so there is no priming state to maintain. Continuity across days lives in the agent's long-term memory (whatever the brief tells it to write), not in the session log.
+The default configuration uses a **daily-rolling** session id — `sessionIdTemplate: "wa-monitor-{date}"` expands to e.g. `wa-monitor-2026-04-17` and rolls at local midnight. Each day starts fresh; the behavior brief is re-sent with every notification, so there is no priming state to maintain. Continuity across days lives in the agent's long-term memory (whatever the brief tells it to write), not in the session log.
 
-To change cadence, swap `$(date +%F)` for something else in the `notify.command`:
+To change cadence in **structured mode**, edit `notify.sessionIdTemplate`:
 
-| Cadence | Fragment |
+| Cadence | Template value |
 |---|---|
-| **Daily (default)** | `wa-monitor-$(date +%F)` |
-| **Weekly** | `wa-monitor-$(date +%Y-W%V)` |
-| **Never roll** | `wa-monitor` (fixed string) |
+| **Daily (default)** | `"wa-monitor-{date}"` |
+| **Weekly** | `"wa-monitor-{week}"` |
+| **Per-chat, daily** | `"wa-monitor-{date}-{chatIdSlug}"` |
+| **Never roll** | `"wa-monitor"` (fixed string, no tokens) |
 
-There are no markers or priming state to clean up when you change cadence — just edit `notify.command` and the next notification picks up the new id.
+To change cadence in **command mode**, edit the `--session-id` fragment in `notify.command`:
+
+| Cadence | Shell fragment |
+|---|---|
+| **Daily** | `wa-monitor-$(date +%F)` |
+| **Weekly** | `wa-monitor-$(date +%Y-W%V)` |
+| **Never roll** | `wa-monitor` |
+
+Either way, there are no markers or priming state to clean up when you change cadence — just update the template (or command) and the next notification picks up the new id.
 
 ### Worked behavior-brief examples
 
@@ -539,7 +555,9 @@ For everything else, do nothing — don't log, don't summarize, don't call any t
 Do not proactively contact me about WhatsApp batches. For every batch, write a short memory note so you can reference it later when I ask. When I do ask "what was on WhatsApp?" or similar (in our normal chat, not this session), recall and summarize from those notes.
 ```
 
-### Filtering before the agent sees the payload
+### Filtering before the agent sees the payload (command mode)
+
+The recipes in this section apply **only to command mode**. Structured mode (`notify.kind: "openclaw-agent"`) has no shell hook between the daemon and `openclaw agent` — if you need shell-level filtering, switch to command mode, or do the filtering in the behavior brief so the agent decides.
 
 For hard cutoffs where you never want to spend an agent turn at all — obvious noise, wrong chat type, keyword-only alerting — guard `notify.command` with a shell conditional. The convenience env vars (`WAM_IS_GROUP`, `WAM_CHAT_ID`, etc.) make this cheap:
 
@@ -752,7 +770,7 @@ The `rm -rf ~/.whatsapp-monitor` step is intentionally separate — users who pl
 
 - The linked WhatsApp account is the user's **personal** number.
 - The CLI has **no send capability**. No code path in this tool can post a message to WhatsApp. If the agent wants to reply to someone, it must do so through a different channel (e.g. `@openclaw/whatsapp` on a separate bot number, email, SMS).
-- `notify.command` runs as the user owning the service process, with full shell access. The config file is user-owned; treat changes to it like changes to any other user script.
+- The notifier — `notify.command` (shell) or `notify.kind: "openclaw-agent"` (spawns `openclaw` directly) — runs as the user owning the service process with that user's full privileges. `command` mode has full shell access; `openclaw-agent` mode passes the behavior brief and message payload into the configured agent. Either way, the config file is user-owned; treat changes to it like changes to any other user script.
 - The JSONL log (`notifications.jsonl`) contains full message text. Treat it as sensitive.
 
 ## Prerequisites
