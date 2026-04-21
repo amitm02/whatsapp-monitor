@@ -31,6 +31,8 @@ A read-only WhatsApp **monitoring service** using Baileys. Runs as a persistent 
 whatsapp-monitor run                 # Persistent listener (primary). Requires allowlist.
 whatsapp-monitor run -v              # Verbose
 whatsapp-monitor run --no-notify     # Skip notify.command; still write JSONL log
+whatsapp-monitor status              # Report link/allowlist/notify/log state; detect live `run` process. Exits 1 if not ready.
+whatsapp-monitor status --json       # Machine-readable status
 whatsapp-monitor notify test         # Fire one synthetic payload through notify.command
 whatsapp-monitor link                # QR code linking (default, interactive)
 whatsapp-monitor link --code --phone 12345678901

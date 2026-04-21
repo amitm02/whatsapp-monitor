@@ -8,6 +8,7 @@ import { messagesCommand } from './commands/messages.js'
 import { resetCommand } from './commands/reset.js'
 import { runCommand } from './commands/run.js'
 import { notifyCommand } from './commands/notify.js'
+import { statusCommand } from './commands/status.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
@@ -20,6 +21,7 @@ program
   .version(version)
 
 program.addCommand(runCommand)
+program.addCommand(statusCommand)
 program.addCommand(notifyCommand)
 program.addCommand(linkCommand)
 program.addCommand(groupsCommand)

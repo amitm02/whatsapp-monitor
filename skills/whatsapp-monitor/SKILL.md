@@ -323,14 +323,19 @@ Pick the right one:
 
 Confirm with the user which platform they're on, then give them the appropriate recipe (see the [Process manager recipes](#process-manager-recipes) section).
 
-After the service is running, confirm:
+After the service is running, confirm with both the process manager and the app-level readiness check:
 
 ```bash
 # macOS
 launchctl list | grep whatsapp-monitor
 # Linux
 systemctl --user status whatsapp-monitor
+
+# Then — app-level check (linked? allowlist? notify config? live `run` process? last dispatched notification?):
+whatsapp-monitor status
 ```
+
+`whatsapp-monitor status` is the single command that answers "is this thing actually ready and running?" across all four dimensions (auth, allowlist, notify config, live `run` process) and surfaces the last line of the notification log. Exit code 0 means ready, non-zero means at least one blocker (reported under `Status: ✗ not ready`). Use `--json` for machine-readable output.
 
 #### First live test — optionally shorten `quietPeriodSec`
 
@@ -365,6 +370,14 @@ Once verified, restore the production value:
 
 and reload the service the same way.
 
+Final sanity check:
+
+```bash
+whatsapp-monitor status
+```
+
+Expect `Status: ✓ ready and running` with a live `pid` under `Processes:`. If not, the listed blockers name what's missing.
+
 Onboarding is complete.
 
 ---
@@ -396,6 +409,7 @@ Fires one synthetic payload through the configured notifier (`notify.command` or
 
 | Command | Purpose |
 |---|---|
+| `whatsapp-monitor status [--json]` | One-shot readiness check: linked, allowlist, notify config, live `run` process, last dispatched notification. Exits non-zero if not ready. |
 | `whatsapp-monitor link [--qr\|--code --phone <num>] [--name <str>] [--reset]` | Link WhatsApp account |
 | `whatsapp-monitor groups [--json]` | List groups with their IDs |
 | `whatsapp-monitor config list` | Show current allowlist and notify config |
@@ -695,6 +709,16 @@ journalctl --user -u whatsapp-monitor -f   # logs
 ---
 
 ## Troubleshooting
+
+### Start here — run `whatsapp-monitor status`
+
+Before diving into any specific symptom below, run:
+
+```bash
+whatsapp-monitor status
+```
+
+It reports auth state, allowlist counts, the resolved notify block, the notification log (size, entry count, last entry), and whether a `run` process is currently alive. If the output says `✗ not ready`, the listed blockers are the exact things to fix (e.g. "not linked", "allowlist is empty", "behaviorFile missing"). If it says `✓ ready and running` but messages still aren't flowing, the issue is almost certainly downstream — the notifier child, the agent, or the agent's messaging tool. Skip ahead to the relevant section below.
 
 ### Version mismatch — installed `whatsapp-monitor` is behind npm `latest`
 
