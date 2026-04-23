@@ -3,13 +3,15 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  BufferJSON,
   WASocket,
   proto,
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
-import { mkdir } from 'fs/promises'
+import { mkdir, open, rename, rm, chmod } from 'fs/promises'
 import { readFileSync, copyFileSync, existsSync } from 'fs'
-import { join } from 'path'
+import { randomUUID } from 'crypto'
+import { join, dirname } from 'path'
 import { Boom } from '@hapi/boom'
 import type {
   MonitorConfig,
@@ -43,6 +45,111 @@ export interface ClientOptions {
   verbose?: boolean
   skipAllowlist?: boolean
   browserName?: string
+  /**
+   * Watchdog: if no event is received from WhatsApp within this many ms
+   * while the socket reports connected, force a reconnect. 0 disables.
+   * Default 10 minutes.
+   */
+  activityWatchdogMs?: number
+}
+
+function describeDisconnect(statusCode: number | undefined): string {
+  if (statusCode == null) return 'unknown'
+  if (statusCode === 440) return `streamConflict(440)`
+  const reason = (DisconnectReason as unknown as Record<string, number>)
+  for (const [name, code] of Object.entries(reason)) {
+    if (code === statusCode) return `${name}(${statusCode})`
+  }
+  return `status=${statusCode}`
+}
+
+/**
+ * Status codes we treat as terminal (no reconnect). Matches OpenClaw's
+ * non-retryable list: 440 = "Unknown Stream Errored (conflict)" — another
+ * linked device has taken over the session. Reconnecting just rotates the
+ * winner; the operator has to close the competing WhatsApp Web session.
+ */
+function isNonRetryableStatus(statusCode: number | undefined): boolean {
+  return statusCode === 440
+}
+
+/**
+ * Atomic creds.json write. Writes to a temp file, fsyncs the file, renames
+ * it over the target (atomic on POSIX), then fsyncs the directory. This
+ * protects against mid-write crashes — if the process dies, creds.json is
+ * either the old valid content or the new valid content, never truncated.
+ *
+ * Baileys' default multi-file auth state uses a plain writeFile which can
+ * leave creds.json half-written if the process is killed at the wrong
+ * moment. That matters because creds.json is the one file that can't be
+ * regenerated without a full re-link (QR scan).
+ */
+async function writeCredsAtomically(authDir: string, creds: unknown): Promise<void> {
+  const credsPath = join(authDir, 'creds.json')
+  const tempPath = join(authDir, `.creds.${process.pid}.${randomUUID()}.tmp`)
+  const json = JSON.stringify(creds, BufferJSON.replacer)
+  const FILE_MODE = 0o600
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    handle = await open(tempPath, 'w', FILE_MODE)
+    await handle.writeFile(json, { encoding: 'utf-8' })
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+
+    await rename(tempPath, credsPath)
+    await chmod(credsPath, FILE_MODE).catch(() => {
+      // best-effort on platforms that don't support chmod
+    })
+
+    // fsync the directory so the rename is durable.
+    let dirHandle: Awaited<ReturnType<typeof open>> | undefined
+    try {
+      dirHandle = await open(dirname(credsPath), 'r')
+      await dirHandle.sync()
+    } catch {
+      // directory fsync not supported on some platforms (e.g. Windows) — best-effort
+    } finally {
+      await dirHandle?.close().catch(() => {})
+    }
+  } catch (err) {
+    await handle?.close().catch(() => {})
+    await rm(tempPath, { force: true }).catch(() => {})
+    throw err
+  }
+}
+
+function formatErr(err: unknown): string {
+  if (!err) return String(err)
+  if (typeof err === 'string') return err
+  if (typeof err !== 'object') return String(err)
+
+  // Extract Boom payload if present — Baileys wraps disconnect errors in
+  // Boom, so `err.output.payload.{error,message}` has the WhatsApp-server-
+  // level reason that's more useful than the generic err.message.
+  const e = err as {
+    name?: unknown
+    message?: unknown
+    code?: unknown
+    output?: { statusCode?: unknown; payload?: { error?: unknown; message?: unknown } }
+  }
+  const status = typeof e.output?.statusCode === 'number' ? e.output.statusCode : undefined
+  const payloadError = typeof e.output?.payload?.error === 'string' ? e.output.payload.error : undefined
+  const payloadMsg = typeof e.output?.payload?.message === 'string' ? e.output.payload.message : undefined
+  const message = typeof e.message === 'string' ? e.message : undefined
+  const codeText = typeof e.code === 'string' || typeof e.code === 'number' ? String(e.code) : undefined
+
+  const parts: string[] = []
+  if (status != null) parts.push(`status=${status}`)
+  if (payloadError) parts.push(payloadError)
+  if (payloadMsg && payloadMsg !== payloadError) parts.push(payloadMsg)
+  if (message && message !== payloadMsg && message !== payloadError) parts.push(message)
+  if (codeText) parts.push(`code=${codeText}`)
+
+  if (parts.length > 0) return parts.join(' ')
+  if (err instanceof Error) return `${err.name}: ${err.message}`
+  return String(err)
 }
 
 // Store original console methods for libsignal noise suppression
@@ -105,12 +212,18 @@ export class WhatsAppMonitor {
   private reconnectAttempts: number = 0
   private dedupeCache: DedupeCache
   private browserName: string
+  private activityWatchdogMs: number
+  private lastActivityAt: number = Date.now()
+  private watchdogTimer: NodeJS.Timeout | null = null
+  private reconnectTimer: NodeJS.Timeout | null = null
+  private reconnecting: boolean = false
 
   constructor(config: MonitorConfig, options: ClientOptions = {}) {
     this.config = config
     this.verbose = options.verbose ?? false
     this.skipAllowlist = options.skipAllowlist ?? false
     this.browserName = options.browserName ?? 'whatsapp-monitor'
+    this.activityWatchdogMs = options.activityWatchdogMs ?? 10 * 60 * 1000
     // When verbose, show libsignal noise (Bad MAC errors, etc.)
     suppressLibsignalNoise = !this.verbose
     // Initialize dedupe cache (20 minute TTL, max 5000 messages)
@@ -121,6 +234,24 @@ export class WhatsAppMonitor {
     if (this.verbose) {
       console.error(`[DEBUG] ${new Date().toISOString()} - ${message}`)
     }
+  }
+
+  /** Always-on info-level logging (visible without --verbose). */
+  private info(message: string): void {
+    console.error(`[wa-monitor ${new Date().toISOString()}] ${message}`)
+  }
+
+  /** Returns ms since the last event from WhatsApp (any event, not just messages). */
+  getIdleMs(): number {
+    return Date.now() - this.lastActivityAt
+  }
+
+  getLastActivityAt(): number {
+    return this.lastActivityAt
+  }
+
+  getReconnectAttempts(): number {
+    return this.reconnectAttempts
   }
 
   private shouldFilter(chatId: string): boolean {
@@ -168,13 +299,24 @@ export class WhatsAppMonitor {
     }
   }
 
-  private enqueueSaveCreds(saveCreds: () => Promise<void>, authDir: string): void {
+  private enqueueSaveCreds(creds: unknown, authDir: string): void {
     this.credsSaveQueue = this.credsSaveQueue
-      .then(() => {
+      .then(async () => {
+        // Backup-before-write protects against the case where the in-flight
+        // atomic write's temp-file creation itself fails (very rare) — the
+        // previous .bak stays valid as a last-resort recovery source.
         this.backupCreds(authDir)
-        return saveCreds()
+        try {
+          await writeCredsAtomically(authDir, creds)
+        } catch (err) {
+          this.info(`creds save failed: ${formatErr(err)}`)
+          throw err
+        }
       })
-      .catch((err) => this.log(`Creds save error: ${err}`))
+      .catch(() => {
+        // Swallow — we logged above. Don't poison the queue with a rejected
+        // promise, or the next enqueue .then() chain inherits the rejection.
+      })
   }
 
   private computeBackoff(): number {
@@ -182,9 +324,72 @@ export class WhatsAppMonitor {
     const max = 30000
     const factor = 1.8
     const jitter = 0.25
-    const base = initial * Math.pow(factor, this.reconnectAttempts)
+    // Clamp attempts so Math.pow can't overflow and backoff always stabilizes at `max`.
+    const attempts = Math.min(this.reconnectAttempts, 10)
+    const base = initial * Math.pow(factor, attempts)
     const jitterMs = base * jitter * Math.random()
     return Math.min(max, Math.round(base + jitterMs))
+  }
+
+  private markActivity(): void {
+    this.lastActivityAt = Date.now()
+  }
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer || this.activityWatchdogMs <= 0) return
+    const intervalMs = Math.max(30_000, Math.floor(this.activityWatchdogMs / 4))
+    this.watchdogTimer = setInterval(() => {
+      // Only act if we believe we're connected. During connect/reconnect, the
+      // `connection.update` handler owns reconnect scheduling.
+      if (this.connectionState !== 'connected') return
+      const idle = this.getIdleMs()
+      if (idle >= this.activityWatchdogMs) {
+        this.info(`watchdog: no WhatsApp events for ${Math.round(idle / 1000)}s while state=connected — forcing reconnect`)
+        this.forceReconnect('watchdog-idle')
+      }
+    }, intervalMs)
+    // Keep timer from preventing process exit if it somehow outlives the service.
+    if (this.watchdogTimer.unref) this.watchdogTimer.unref()
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer)
+      this.watchdogTimer = null
+    }
+  }
+
+  private forceReconnect(reason: string): void {
+    if (this.reconnecting) return
+    this.reconnecting = true
+    this.info(`reconnect: tearing down socket (reason=${reason})`)
+    try {
+      this.socket?.end(new Error(`force-reconnect: ${reason}`))
+    } catch (err) {
+      this.info(`reconnect: socket.end threw: ${formatErr(err)}`)
+    }
+    this.socket = null
+    this.setConnectionState('disconnected')
+    this.reconnectAttempts++
+    const backoffMs = this.computeBackoff()
+    this.info(`reconnect: scheduled in ${backoffMs}ms (attempt ${this.reconnectAttempts}, reason=${reason})`)
+    this.scheduleReconnect(backoffMs)
+  }
+
+  private scheduleReconnect(delayMs: number): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      this.reconnecting = false
+      this.connect().catch((err) => {
+        this.info(`reconnect: connect() threw: ${formatErr(err)} — retrying in ${this.computeBackoff()}ms`)
+        this.reconnectAttempts++
+        this.scheduleReconnect(this.computeBackoff())
+      })
+    }, delayMs)
+    if (this.reconnectTimer.unref) this.reconnectTimer.unref()
   }
 
   async connect(): Promise<void> {
@@ -193,7 +398,7 @@ export class WhatsAppMonitor {
     // Attempt to restore credentials from backup if corrupted
     this.maybeRestoreCredsFromBackup(this.config.authDir)
 
-    const { state, saveCreds } = await useMultiFileAuthState(this.config.authDir)
+    const { state } = await useMultiFileAuthState(this.config.authDir)
     const { version } = await fetchLatestBaileysVersion()
     this.log(`connect: using Baileys version ${version.join('.')}`)
 
@@ -216,13 +421,20 @@ export class WhatsAppMonitor {
 
     // Add WebSocket error handler to prevent crashes
     if (this.socket.ws && typeof (this.socket.ws as unknown as { on?: Function }).on === 'function') {
-      (this.socket.ws as unknown as { on: Function }).on('error', (err: Error) => {
-        this.log(`WebSocket error: ${err.message}`)
+      const ws = this.socket.ws as unknown as { on: Function }
+      ws.on('error', (err: Error) => {
+        this.info(`websocket error: ${err.message}`)
+      })
+      ws.on('close', (code: number, reason: Buffer | string) => {
+        const reasonStr = Buffer.isBuffer(reason) ? reason.toString('utf-8') : String(reason ?? '')
+        this.log(`websocket closed: code=${code} reason="${reasonStr}"`)
       })
     }
 
-    // Use queued credential saving to prevent corruption from concurrent saves
-    this.socket.ev.on('creds.update', () => this.enqueueSaveCreds(saveCreds, this.config.authDir))
+    // Use queued, atomic credential saving. Baileys' default saveCreds uses a
+    // plain writeFile which can truncate creds.json on an abrupt crash; we
+    // replace it with a temp-file+fsync+rename path instead.
+    this.socket.ev.on('creds.update', () => this.enqueueSaveCreds(state.creds, this.config.authDir))
 
 
     this.socket.ev.on('connection.update', (update) => {
@@ -254,30 +466,62 @@ export class WhatsAppMonitor {
       }
 
       if (connection === 'close') {
-        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+        const err = lastDisconnect?.error as Boom | Error | undefined
+        const statusCode = (err as Boom)?.output?.statusCode
+        const errMsg = err ? formatErr(err) : 'no error provided'
+        const reasonLabel = describeDisconnect(statusCode)
+        const loggedOut = statusCode === DisconnectReason.loggedOut
+        const nonRetryable = isNonRetryableStatus(statusCode)
+        const shouldReconnect = !loggedOut && !nonRetryable
 
-        if (statusCode === DisconnectReason.loggedOut) {
+        this.info(`connection closed: reason=${reasonLabel} error="${errMsg}" willReconnect=${shouldReconnect}`)
+
+        if (loggedOut) {
           this.setConnectionState('logged_out')
+          this.stopWatchdog()
+        } else if (nonRetryable) {
+          this.setConnectionState('conflict')
+          this.stopWatchdog()
         } else {
           this.setConnectionState('disconnected')
         }
 
         // Clean up old socket before reconnecting
         if (this.socket) {
-          this.socket.end(undefined)
+          try {
+            this.socket.end(undefined)
+          } catch (e) {
+            this.info(`socket.end during close threw: ${formatErr(e)}`)
+          }
           this.socket = null
         }
 
         if (shouldReconnect) {
           this.reconnectAttempts++
           const backoffMs = this.computeBackoff()
-          this.log(`Reconnecting in ${backoffMs}ms (attempt ${this.reconnectAttempts})`)
-          setTimeout(() => this.connect(), backoffMs)
+          this.info(`reconnect: scheduled in ${backoffMs}ms (attempt ${this.reconnectAttempts}, reason=${reasonLabel})`)
+          this.reconnecting = false
+          this.scheduleReconnect(backoffMs)
+        } else if (loggedOut) {
+          this.info('not reconnecting: session logged out — re-link with `whatsapp-monitor link`')
+        } else {
+          // 440 stream conflict — another linked device grabbed the session.
+          this.info(
+            'not reconnecting: session conflict (status 440). Another WhatsApp Web device has taken over this session. ' +
+              'Close the competing WhatsApp Web session (browser/desktop app/other linked device), then restart this service.'
+          )
         }
       } else if (connection === 'open') {
+        if (this.reconnectAttempts > 0) {
+          this.info(`connection open: recovered after ${this.reconnectAttempts} reconnect attempt(s)`)
+        } else {
+          this.info('connection open')
+        }
         this.reconnectAttempts = 0 // Reset on successful connection
+        this.reconnecting = false
+        this.markActivity()
         this.setConnectionState('connected')
+        this.startWatchdog()
 
         // Fallback: if no sync events within 5 seconds, consider ready
         // This handles reconnection cases where Baileys skips sync
@@ -290,6 +534,8 @@ export class WhatsAppMonitor {
             this.readyCallbacks.forEach((cb) => cb())
           }
         }, 5000)
+      } else if (connection === 'connecting') {
+        this.info('connection: connecting...')
       }
     })
 
@@ -526,6 +772,11 @@ export class WhatsAppMonitor {
   }
 
   async disconnect(): Promise<void> {
+    this.stopWatchdog()
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.socket) {
       this.socket.end(undefined)
       this.socket = null
@@ -684,6 +935,8 @@ export class WhatsAppMonitor {
   }
 
   private emitRawEvent(event: string, data: unknown): void {
+    // Every Baileys event counts as liveness — this is the watchdog's signal.
+    this.markActivity()
     this.rawEventCallbacks.forEach((cb) => cb(event, data))
   }
 

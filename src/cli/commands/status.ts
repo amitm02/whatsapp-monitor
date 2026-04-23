@@ -3,14 +3,17 @@ import { existsSync, statSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { join } from 'path'
 import {
   loadConfig,
   resolveNotify,
   hasExistingAuth,
   getConfigPath,
+  getConfigDir,
   NotifyConfigError,
 } from '../../config.js'
-import type { NotificationPayload, ResolvedNotify } from '../../types.js'
+import type { NotificationPayload, ResolvedNotify, ConnectionState } from '../../types.js'
+import { readLiveRuntimeState, type RuntimeState } from '../../runtime-state.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -33,6 +36,16 @@ interface LogSummary {
     lastTimestamp: number
   }
   error?: string
+}
+
+interface LiveState {
+  pid: number
+  startedAt: number
+  updatedAt: number
+  connectionState: ConnectionState
+  lastActivityAt: number
+  reconnectAttempts: number
+  idleSec: number
 }
 
 interface StatusReport {
@@ -62,6 +75,7 @@ interface StatusReport {
       }
   log: LogSummary
   runProcesses: RunProcess[]
+  live: LiveState | null
   ready: boolean
   blockers: string[]
 }
@@ -78,7 +92,12 @@ export const statusCommand = new Command('status')
       printHuman(report)
     }
 
-    process.exit(report.ready ? 0 : 1)
+    const healthy =
+      report.ready &&
+      (report.live === null ||
+        (report.live.connectionState !== 'conflict' &&
+          report.live.connectionState !== 'logged_out'))
+    process.exit(healthy ? 0 : 1)
   })
 
 async function buildStatus(): Promise<StatusReport> {
@@ -121,6 +140,18 @@ async function buildStatus(): Promise<StatusReport> {
 
   const runProcesses = await findRunProcesses()
 
+  const runtimeStatePath = join(getConfigDir(), 'runtime-state.json')
+  const live = buildLiveState(readLiveRuntimeState(runtimeStatePath))
+
+  if (live?.connectionState === 'conflict') {
+    blockers.push(
+      'WhatsApp session conflict (status 440): another WhatsApp Web device has taken over this slot. ' +
+        'Close the competing session on your other device(s) and restart `whatsapp-monitor run`.'
+    )
+  } else if (live?.connectionState === 'logged_out') {
+    blockers.push('WhatsApp session logged out — re-run `whatsapp-monitor link`')
+  }
+
   const ready = !configError && linked && !empty && !notifyError
 
   return {
@@ -131,8 +162,22 @@ async function buildStatus(): Promise<StatusReport> {
     notify: notifySection,
     log,
     runProcesses,
+    live,
     ready,
     blockers,
+  }
+}
+
+function buildLiveState(state: RuntimeState | null): LiveState | null {
+  if (!state) return null
+  return {
+    pid: state.pid,
+    startedAt: state.startedAt,
+    updatedAt: state.updatedAt,
+    connectionState: state.connectionState,
+    lastActivityAt: state.lastActivityAt,
+    reconnectAttempts: state.reconnectAttempts,
+    idleSec: Math.max(0, Math.round((Date.now() - state.lastActivityAt) / 1000)),
   }
 }
 
@@ -293,8 +338,31 @@ function printHuman(r: StatusReport): void {
   }
 
   console.log('')
-  if (r.ready && r.runProcesses.length > 0) {
-    console.log('Status: ✓ ready and running')
+  console.log('Live connection:')
+  if (!r.live) {
+    console.log('  (not running, or `run` process is from a pre-upgrade version)')
+  } else {
+    const lbl = connectionStateLabel(r.live.connectionState)
+    console.log(`  State:              ${lbl}`)
+    console.log(`  Pid:                ${r.live.pid}`)
+    console.log(`  Uptime:             ${formatDuration(Date.now() - r.live.startedAt)}`)
+    console.log(`  Last activity:      ${new Date(r.live.lastActivityAt).toISOString()} (${formatDuration(r.live.idleSec * 1000)} ago)`)
+    console.log(`  Reconnect attempts: ${r.live.reconnectAttempts}`)
+    console.log(`  State file age:     ${formatDuration(Date.now() - r.live.updatedAt)}`)
+  }
+
+  console.log('')
+  const live = r.live
+  if (live?.connectionState === 'conflict') {
+    console.log('Status: ✗ session conflict (440)')
+    for (const b of r.blockers) console.log(`  - ${b}`)
+  } else if (live?.connectionState === 'logged_out') {
+    console.log('Status: ✗ logged out')
+    for (const b of r.blockers) console.log(`  - ${b}`)
+  } else if (r.ready && live?.connectionState === 'connected') {
+    console.log('Status: ✓ ready and connected')
+  } else if (r.ready && r.runProcesses.length > 0) {
+    console.log(`Status: ✓ ready and running (${live ? live.connectionState : 'no live state'})`)
   } else if (r.ready) {
     console.log('Status: ✓ ready (not running — start with `whatsapp-monitor run`)')
   } else {
@@ -302,6 +370,33 @@ function printHuman(r: StatusReport): void {
     for (const b of r.blockers) console.log(`  - ${b}`)
   }
   console.log('')
+}
+
+function connectionStateLabel(state: ConnectionState): string {
+  switch (state) {
+    case 'connected':
+      return '✓ connected'
+    case 'connecting':
+      return '… connecting'
+    case 'disconnected':
+      return '⟳ disconnected (reconnecting)'
+    case 'logged_out':
+      return '✗ logged out'
+    case 'conflict':
+      return '✗ session conflict (440 — another WhatsApp Web device took over)'
+  }
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 0) ms = 0
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ${sec % 60}s`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ${min % 60}m`
+  const d = Math.floor(hr / 24)
+  return `${d}d ${hr % 24}h`
 }
 
 function formatBytes(n: number): string {

@@ -118,7 +118,15 @@ export type MessageType =
 
 export type MessageCallback = (message: MonitorMessage) => void
 
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'logged_out'
+export type ConnectionState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'logged_out'
+  // Terminal non-retryable state: another WhatsApp Web linked device is
+  // actively taking over the session (status 440). Reconnecting would just
+  // rotate who holds the slot, so we stop and surface the conflict.
+  | 'conflict'
 
 export type ConnectionCallback = (state: ConnectionState) => void
 
