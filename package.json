@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-monitor",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Read-only WhatsApp monitoring service using Baileys, with a shell-command notify pipeline",
   "type": "module",
   "main": "./dist/index.js",

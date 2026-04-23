@@ -49,6 +49,7 @@ errorAlertsCommand
     if (t.loggedOut) triggers.push('loggedOut')
     if (t.extendedDisconnectAfterSec !== null) triggers.push(`extendedDisconnect(${t.extendedDisconnectAfterSec}s)`)
     if (t.dispatchFailuresAfter !== null) triggers.push(`dispatchFailures(${t.dispatchFailuresAfter} consecutive)`)
+    if (t.notLinked) triggers.push('notLinked')
     info(`[info] triggers:             [${triggers.join(', ')}]`)
 
     const errorAlerter = new ErrorAlerter({

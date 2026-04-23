@@ -17,6 +17,7 @@ export type ErrorAlertKind =
   | 'loggedOut'
   | 'extendedDisconnect'
   | 'dispatchFailures'
+  | 'notLinked'
   | 'test'
 
 export interface ErrorAlertsConfig {
@@ -29,6 +30,7 @@ export interface ErrorAlertsConfig {
     loggedOut?: boolean
     extendedDisconnect?: { afterSec?: number } | boolean
     dispatchFailures?: { afterConsecutive?: number } | boolean
+    notLinked?: boolean
   }
 }
 
@@ -43,6 +45,7 @@ export interface ResolvedErrorAlerts {
     loggedOut: boolean
     extendedDisconnectAfterSec: number | null
     dispatchFailuresAfter: number | null
+    notLinked: boolean
   }
 }
 

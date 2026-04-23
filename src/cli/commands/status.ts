@@ -97,6 +97,7 @@ interface StatusReport {
           loggedOut: boolean
           extendedDisconnectAfterSec: number | null
           dispatchFailuresAfter: number | null
+          notLinked: boolean
         }
       }
   ready: boolean
@@ -407,6 +408,7 @@ function printHuman(r: StatusReport): void {
       triggers.push(`extendedDisconnect(${a.triggers.extendedDisconnectAfterSec}s)`)
     if (a.triggers.dispatchFailuresAfter !== null)
       triggers.push(`dispatchFailures(${a.triggers.dispatchFailuresAfter} consecutive)`)
+    if (a.triggers.notLinked) triggers.push('notLinked')
     console.log(`  Triggers:      [${triggers.join(', ')}]`)
     console.log(`  Log file:      ${a.logFile}`)
     if (a.logExists && a.lastEntryAt) {

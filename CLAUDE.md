@@ -98,7 +98,7 @@ Setting both `command` and `kind` is a config error. See `skills/whatsapp-monito
 
 ### Error alerts (operator notifications on service issues)
 
-Orthogonal to `notify` — this is for the operator, not for forwarding messages. If the service hits trouble (WhatsApp stream conflict, logged-out, extended disconnect, repeated dispatch failures), `errorAlerts.command` is invoked via `sh -c` with a short JSON describing the incident on stdin and `WAM_ERROR_ALERT_*` env vars (`WAM_ERROR_ALERT_KIND`, `WAM_ERROR_ALERT_MESSAGE`, `WAM_ERROR_ALERT_TIMESTAMP`).
+Orthogonal to `notify` — this is for the operator, not for forwarding messages. If the service hits trouble (WhatsApp stream conflict, logged-out, extended disconnect, repeated dispatch failures, auth dir missing at startup), `errorAlerts.command` is invoked via `sh -c` with a short JSON describing the incident on stdin and `WAM_ERROR_ALERT_*` env vars (`WAM_ERROR_ALERT_KIND`, `WAM_ERROR_ALERT_MESSAGE`, `WAM_ERROR_ALERT_TIMESTAMP`).
 
 ```json
 {
@@ -110,7 +110,8 @@ Orthogonal to `notify` — this is for the operator, not for forwarding messages
       "conflict": true,
       "loggedOut": true,
       "extendedDisconnect": { "afterSec": 600 },
-      "dispatchFailures": { "afterConsecutive": 5 }
+      "dispatchFailures": { "afterConsecutive": 5 },
+      "notLinked": true
     }
   }
 }
@@ -118,7 +119,7 @@ Orthogonal to `notify` — this is for the operator, not for forwarding messages
 
 The long `--message` preamble is deliberate: without it, an agent trained on message-content decisions in the main session may treat an error alert as a passive batch to drop.
 
-Defaults when `errorAlerts.command` is set: all four triggers on, 15 min per-kind throttle, 60s cmd timeout, log at `~/.whatsapp-monitor/error-alerts.jsonl`. Every fire attempt is appended to the log regardless of whether the shell command ran (durable record even when throttled). Throttling is per-kind — a flood of `dispatchFailures` alerts doesn't mute a subsequent `conflict` alert.
+Defaults when `errorAlerts.command` is set: all five triggers on, 15 min per-kind throttle, 60s cmd timeout, log at `~/.whatsapp-monitor/error-alerts.jsonl`. Every fire attempt is appended to the log regardless of whether the shell command ran (durable record even when throttled). Throttling is per-kind — a flood of `dispatchFailures` alerts doesn't mute a subsequent `conflict` alert. The `notLinked` trigger fires at `run` startup if `authDir/creds.json` is missing (fresh install, wiped auth, or machine migration without the auth dir); the service then exits 1 so a restart loop from the service manager doesn't spam (throttle + exit-after-fire handle the rest).
 
 Error alerts cannot detect the service crashing (no process to send from). For crash detection, use an external watchdog: a cron job or systemd timer that runs `whatsapp-monitor status --json` and fires the error-alert command itself when `runProcesses` is empty. See the skill for a recipe.
 

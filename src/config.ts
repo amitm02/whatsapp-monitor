@@ -137,6 +137,7 @@ function normalizeErrorAlerts(input: unknown): ErrorAlertsConfig | undefined {
     errorAlerts.on = {}
     if (typeof on.conflict === 'boolean') errorAlerts.on.conflict = on.conflict
     if (typeof on.loggedOut === 'boolean') errorAlerts.on.loggedOut = on.loggedOut
+    if (typeof on.notLinked === 'boolean') errorAlerts.on.notLinked = on.notLinked
     if (typeof on.extendedDisconnect === 'boolean') {
       errorAlerts.on.extendedDisconnect = on.extendedDisconnect
     } else if (on.extendedDisconnect && typeof on.extendedDisconnect === 'object') {
@@ -181,12 +182,13 @@ export function resolveErrorAlerts(errorAlerts: ErrorAlertsConfig | undefined): 
     timeoutSec: errorAlerts?.timeoutSec ?? DEFAULT_ERROR_ALERTS_TIMEOUT_SEC,
     logFile: resolvePath(errorAlerts?.logFile ?? DEFAULT_ERROR_ALERTS_LOG, CONFIG_DIR),
     triggers: {
-      // Default to on for conflict/loggedOut when error alerts are enabled;
-      // these are the high-value signals operators almost always want.
+      // Default to on for conflict/loggedOut/notLinked when error alerts are
+      // enabled; these are the high-value signals operators almost always want.
       conflict: enabled && on.conflict !== false,
       loggedOut: enabled && on.loggedOut !== false,
       extendedDisconnectAfterSec: enabled ? extractExtended() : null,
       dispatchFailuresAfter: enabled ? extractDispatchFailures() : null,
+      notLinked: enabled && on.notLinked !== false,
     },
   }
 }

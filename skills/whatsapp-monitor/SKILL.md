@@ -313,11 +313,11 @@ Exit code 0 means every step passed. Non-zero means at least one step failed —
 
 > **Terminology** — "error alert" / "error-alerts" throughout this skill means a signal that the monitor *itself* is having trouble (session conflict, logged-out, disconnected, dispatch failures). Distinct from the `notify` pipeline in Step 4, which forwards WhatsApp message content. The two pipelines are independent: one tells the user about messages arriving, the other tells them when the service is broken.
 
-**What this is:** a separate pipeline from `notify`. `notify` forwards incoming WhatsApp messages to the agent as content. **Error alerts** notify the operator (you/your agent) about **problems with the service itself**: the WhatsApp session hitting a stream conflict (440), being logged out, staying disconnected for an extended period, or the `notify.command` failing repeatedly. Without this configured, those problems only show up in logs — you'd never know until you notice messages have stopped arriving.
+**What this is:** a separate pipeline from `notify`. `notify` forwards incoming WhatsApp messages to the agent as content. **Error alerts** notify the operator (you/your agent) about **problems with the service itself**: the WhatsApp session hitting a stream conflict (440), being logged out, staying disconnected for an extended period, the `notify.command` failing repeatedly, or the service starting without a linked account (e.g. after the auth dir was wiped or the machine was restored without it). Without this configured, those problems only show up in logs — you'd never know until you notice messages have stopped arriving.
 
 Ask the user:
 
-> "Do you want to be alerted if the monitor itself runs into trouble? The common cases are: another device takes over the WhatsApp Web session, the session gets logged out, the service stays disconnected for more than ~10 minutes, or the agent pipeline keeps failing. **I recommend sending these error alerts to the same agent as your notifications** — it already has context about the setup and can message you (via Telegram, Slack, whatever). It uses a separate session so error alerts don't pollute your message-notification session."
+> "Do you want to be alerted if the monitor itself runs into trouble? The common cases are: another device takes over the WhatsApp Web session, the session gets logged out, the service stays disconnected for more than ~10 minutes, the agent pipeline keeps failing, or the service tries to start but the auth dir is gone (e.g. after a machine migration). **I recommend sending these error alerts to the same agent as your notifications** — it already has context about the setup and can message you (via Telegram, Slack, whatever). It uses a separate session so error alerts don't pollute your message-notification session."
 
 If the user agrees, add an `errorAlerts` block to `~/.whatsapp-monitor/config.json`:
 
@@ -335,7 +335,7 @@ If the user agrees, add an `errorAlerts` block to `~/.whatsapp-monitor/config.js
 }
 ```
 
-Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step 4 — same agent, different session id. All four triggers default to on when `errorAlerts.command` is set.
+Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step 4 — same agent, different session id. All five triggers default to on when `errorAlerts.command` is set.
 
 **Why the long prefix in `--message`.** An agent configured for the main notify session is likely trained to "decide whether the user cares about this batch" and often silently drop noise. An error alert framed like a message batch might get dropped the same way. The preamble tells the agent explicitly that this is a *health* event, not content, and that it must actively call a messaging tool rather than reply. If the user is confident their agent's general memory already covers this (e.g. "in any session containing the string 'error alert' reach me on Telegram immediately"), they can simplify to a shorter `--message`.
 
@@ -345,7 +345,7 @@ Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step
 - **`errorAlerts.throttleSec`** (default `900` = 15 min) — per-kind throttle. The same kind of error alert won't fire twice within this window. Different kinds (e.g. `conflict` then `loggedOut`) are independent.
 - **`errorAlerts.timeoutSec`** (default `60`) — max time the child command can run. SIGTERM, 2s grace, SIGKILL.
 - **`errorAlerts.logFile`** (default `~/.whatsapp-monitor/error-alerts.jsonl`) — every fire attempt is appended here, whether or not the child was invoked (throttled alerts are logged but not sent). Durable record for postmortems.
-- **`errorAlerts.on`** — per-trigger switches. All default to on when the command is set. To disable one: `"conflict": false`. To change extended-disconnect threshold: `"extendedDisconnect": { "afterSec": 300 }`. To change dispatch-failures threshold: `"dispatchFailures": { "afterConsecutive": 3 }`.
+- **`errorAlerts.on`** — per-trigger switches. All default to on when the command is set. To disable one: `"conflict": false`. To change extended-disconnect threshold: `"extendedDisconnect": { "afterSec": 300 }`. To change dispatch-failures threshold: `"dispatchFailures": { "afterConsecutive": 3 }`. The `notLinked` trigger fires at `run` startup if `authDir/creds.json` is missing (fresh install, wiped auth, or machine migration without the auth dir); the service then exits 1 so the process manager sees a failure.
 
 **Briefing the agent further (optional).** The preamble in `--message` above is usually enough. If the user wants belt-and-suspenders, add a short note to the agent's general memory (not the monitor's behavior.md — that one is for message-content decisions): "Any turn in session `wa-monitor-error-alerts` is a service-health error alert. Relay it to me via my Telegram tool immediately." This helps if the preamble ever gets shortened.
 
@@ -529,12 +529,13 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 | `errorAlerts.on.loggedOut` | `true` | Fire when WhatsApp reports the session is logged out. |
 | `errorAlerts.on.extendedDisconnect` | `{ afterSec: 600 }` | Fire when the monitor has been in a non-connected state for this many seconds. Set to `false` to disable. |
 | `errorAlerts.on.dispatchFailures` | `{ afterConsecutive: 5 }` | Fire after this many consecutive `notify` dispatch failures (spawn error / non-zero exit / timeout). Resets on the first successful dispatch. Set to `false` to disable. |
+| `errorAlerts.on.notLinked` | `true` | Fire at `run` startup if `authDir/creds.json` is missing. The service exits 1 after firing. Set to `false` to disable (not recommended — the service would silently hang waiting for a QR). |
 
 ### Error-alert payload shape
 
 ```jsonc
 {
-  "kind": "conflict",           // one of: conflict, loggedOut, extendedDisconnect, dispatchFailures, test
+  "kind": "conflict",           // one of: conflict, loggedOut, extendedDisconnect, dispatchFailures, notLinked, test
   "message": "WhatsApp Web stream conflict (status 440): another linked device has taken over…",
   "timestamp": 1713300000000,
   "details": {                  // kind-specific fields
@@ -782,7 +783,7 @@ journalctl --user -u whatsapp-monitor -f   # logs
 
 ### External watchdog (for crash detection)
 
-The in-process error-alerts pipeline (Step 4.5) covers `conflict`, `loggedOut`, `extendedDisconnect`, and `dispatchFailures`. It **cannot** cover a process crash — a killed or OOM'd `run` process can't send its own alert. For that, run a short cron job / systemd timer that polls `whatsapp-monitor status --json` and fires `errorAlerts.command` itself when the service is down.
+The in-process error-alerts pipeline (Step 4.5) covers `conflict`, `loggedOut`, `extendedDisconnect`, `dispatchFailures`, and `notLinked`. It **cannot** cover a process crash at runtime — a killed or OOM'd `run` process can't send its own alert. For that, run a short cron job / systemd timer that polls `whatsapp-monitor status --json` and fires `errorAlerts.command` itself when the service is down.
 
 Only set this up if Step 4.5 is done — the watchdog reuses the same `errorAlerts.command`.
 

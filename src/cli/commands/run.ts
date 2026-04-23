@@ -3,7 +3,7 @@ import { join } from 'path'
 import { createClient } from '../utils.js'
 import { Notifier } from '../../notifier.js'
 import { Dispatcher, type DispatchResult } from '../../dispatcher.js'
-import { resolveNotify, resolveErrorAlerts, getConfigDir } from '../../config.js'
+import { resolveNotify, resolveErrorAlerts, getConfigDir, hasExistingAuth } from '../../config.js'
 import { acquireLock } from '../../lockfile.js'
 import { writeRuntimeState, clearRuntimeState } from '../../runtime-state.js'
 import { ErrorAlerter, defaultErrorAlertStatePath } from '../../error-alerts.js'
@@ -37,12 +37,42 @@ export const runCommand = new Command('run')
       process.exit(1)
     }
 
+    const configDir = getConfigDir()
+
+    // Auth check. Without a linked session, the service starts but sits
+    // waiting for a QR scan nobody will see (run.ts doesn't print QRs —
+    // that's the `link` command's job). Fire a notLinked error alert so
+    // the operator is told to run `link`, then exit. Fire-before-lock so
+    // repeated restart attempts by the service manager don't need to
+    // contend over the lock.
+    if (!hasExistingAuth(config.authDir)) {
+      const earlyAlerts = resolveErrorAlerts(config.errorAlerts)
+      if (earlyAlerts.enabled && earlyAlerts.triggers.notLinked) {
+        const alerter = new ErrorAlerter({
+          errorAlerts: earlyAlerts,
+          stateFile: defaultErrorAlertStatePath(configDir),
+          onWarning: (msg) => console.error(`[warn] ${msg}`),
+        })
+        await alerter
+          .fire(
+            'notLinked',
+            'WhatsApp monitor tried to start but the auth directory is empty — the account has never been linked, or the auth state was reset. Run `whatsapp-monitor link` on the host to scan a QR code.',
+            { authDir: config.authDir }
+          )
+          .catch((err) => console.error(`[warn] error-alert fire threw: ${formatError(err)}`))
+      }
+      console.error(
+        `WhatsApp is not linked (auth dir is empty: ${config.authDir}).\n` +
+          `Run \`whatsapp-monitor link\` on this host to scan a QR code, then restart the service.`
+      )
+      process.exit(1)
+    }
+
     // Exclusive PID-file lock. Two concurrent `run` processes sharing the
     // same auth dir would fight over the same WhatsApp Web slot and produce
     // a status 440 loop, so we refuse to start if another live instance is
     // already running. Stale locks (crashed process, file never cleaned up)
     // are detected and cleared automatically.
-    const configDir = getConfigDir()
     const lockPath = join(configDir, 'run.lock')
     const runtimeStatePath = join(configDir, 'runtime-state.json')
     const lock = acquireLock(lockPath)
@@ -98,6 +128,7 @@ export const runCommand = new Command('run')
         triggersList.push(`extendedDisconnect(${t.extendedDisconnectAfterSec}s)`)
       if (t.dispatchFailuresAfter !== null)
         triggersList.push(`dispatchFailures(${t.dispatchFailuresAfter} consecutive)`)
+      if (t.notLinked) triggersList.push('notLinked')
       logInfo(`error-alerts: enabled throttle=${errorAlertsResolved.throttleSec}s triggers=[${triggersList.join(', ')}]`)
       logInfo(`error-alerts log: ${errorAlertsResolved.logFile}`)
     } else {
