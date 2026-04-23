@@ -2,12 +2,12 @@ import { spawn } from 'child_process'
 import { appendFile, mkdir } from 'fs/promises'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { dirname, join } from 'path'
-import type { AlertKind, AlertPayload, ResolvedAlerts } from './types.js'
+import type { ErrorAlertKind, ErrorAlertPayload, ResolvedErrorAlerts } from './types.js'
 
 const SIGKILL_GRACE_MS = 2000
 
-export interface AlerterOptions {
-  alerts: ResolvedAlerts
+export interface ErrorAlerterOptions {
+  errorAlerts: ResolvedErrorAlerts
   stateFile: string
   onWarning?: (msg: string) => void
 }
@@ -24,17 +24,17 @@ export interface FireResult {
   stderrPreview?: string
 }
 
-interface AlertState {
+interface ErrorAlertState {
   // Per-kind throttle. Each kind throttles independently so a flood of
   // dispatch-failure alerts doesn't mute a subsequent conflict alert.
-  lastFiredByKind: Partial<Record<AlertKind, number>>
+  lastFiredByKind: Partial<Record<ErrorAlertKind, number>>
 }
 
-function readState(path: string): AlertState {
+function readState(path: string): ErrorAlertState {
   if (!existsSync(path)) return { lastFiredByKind: {} }
   try {
     const raw = readFileSync(path, 'utf-8')
-    const parsed = JSON.parse(raw) as AlertState
+    const parsed = JSON.parse(raw) as ErrorAlertState
     if (parsed && typeof parsed === 'object' && parsed.lastFiredByKind) return parsed
   } catch {
     // fall through
@@ -42,7 +42,7 @@ function readState(path: string): AlertState {
   return { lastFiredByKind: {} }
 }
 
-function writeState(path: string, state: AlertState): void {
+function writeState(path: string, state: ErrorAlertState): void {
   try {
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify(state, null, 2), 'utf-8')
@@ -53,46 +53,46 @@ function writeState(path: string, state: AlertState): void {
 }
 
 /**
- * Alerter — fires operator-facing alerts when the monitor hits trouble
+ * ErrorAlerter — fires operator-facing alerts when the monitor hits trouble
  * states (stream conflict, logged-out, extended disconnect, repeated
- * dispatch failures). Always appends to `alerts.logFile` regardless of
+ * dispatch failures). Always appends to `errorAlerts.logFile` regardless of
  * whether the shell command was invoked, so there's a durable record even
  * when throttling kicks in.
  *
- * Delivery is via `sh -c alerts.command` with a JSON payload on stdin and
- * `WAM_ALERT_*` env vars for quick shell-conditional use. Symmetric with
- * `notify.command` so the mental model is shared.
+ * Delivery is via `sh -c errorAlerts.command` with a JSON payload on stdin
+ * and `WAM_ERROR_ALERT_*` env vars for quick shell-conditional use.
+ * Symmetric with `notify.command` so the mental model is shared.
  */
-export class Alerter {
-  private readonly opts: AlerterOptions
-  private state: AlertState
+export class ErrorAlerter {
+  private readonly opts: ErrorAlerterOptions
+  private state: ErrorAlertState
   private logReady: Promise<void> | null = null
 
-  constructor(opts: AlerterOptions) {
+  constructor(opts: ErrorAlerterOptions) {
     this.opts = opts
     this.state = readState(opts.stateFile)
   }
 
   isEnabled(): boolean {
-    return this.opts.alerts.enabled
+    return this.opts.errorAlerts.enabled
   }
 
   /**
-   * Fire an alert of the given kind. Idempotent within the throttle
+   * Fire an error alert of the given kind. Idempotent within the throttle
    * window per-kind — subsequent calls during the window return
    * {fired: false, reason: 'throttled'} but still append to the log.
    *
    * Pass `force: true` for explicit test invocations that should bypass
-   * throttling (e.g. `alerts test`).
+   * throttling (e.g. `error-alerts test`).
    */
   async fire(
-    kind: AlertKind,
+    kind: ErrorAlertKind,
     message: string,
     details?: Record<string, unknown>,
     opts: { force?: boolean } = {}
   ): Promise<FireResult> {
-    const alerts = this.opts.alerts
-    const payload: AlertPayload = {
+    const errorAlerts = this.opts.errorAlerts
+    const payload: ErrorAlertPayload = {
       kind,
       message,
       timestamp: Date.now(),
@@ -104,13 +104,13 @@ export class Alerter {
     // the durable record for postmortem.
     await this.appendLog(json)
 
-    if (!alerts.enabled) {
+    if (!errorAlerts.enabled) {
       return { fired: false, reason: 'disabled' }
     }
 
     if (!opts.force) {
       const last = this.state.lastFiredByKind[kind] ?? 0
-      const throttleMs = alerts.throttleSec * 1000
+      const throttleMs = errorAlerts.throttleSec * 1000
       if (throttleMs > 0 && Date.now() - last < throttleMs) {
         return { fired: false, reason: 'throttled' }
       }
@@ -128,21 +128,21 @@ export class Alerter {
 
   private async appendLog(line: string): Promise<void> {
     if (!this.logReady) {
-      this.logReady = mkdir(dirname(this.opts.alerts.logFile), { recursive: true }).then(() => undefined)
+      this.logReady = mkdir(dirname(this.opts.errorAlerts.logFile), { recursive: true }).then(() => undefined)
     }
     try {
       await this.logReady
-      await appendFile(this.opts.alerts.logFile, line + '\n', 'utf-8')
+      await appendFile(this.opts.errorAlerts.logFile, line + '\n', 'utf-8')
     } catch (err) {
-      this.opts.onWarning?.(`Failed to append to alerts log: ${formatError(err)}`)
+      this.opts.onWarning?.(`Failed to append to error-alerts log: ${formatError(err)}`)
     }
   }
 
   private execChild(
-    payload: AlertPayload,
+    payload: ErrorAlertPayload,
     json: string
   ): Promise<Omit<FireResult, 'fired' | 'reason'>> {
-    const { command, timeoutSec } = this.opts.alerts
+    const { command, timeoutSec } = this.opts.errorAlerts
     const start = Date.now()
 
     return new Promise((resolve) => {
@@ -150,9 +150,9 @@ export class Alerter {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
-          WAM_ALERT_KIND: payload.kind,
-          WAM_ALERT_MESSAGE: payload.message,
-          WAM_ALERT_TIMESTAMP: String(payload.timestamp),
+          WAM_ERROR_ALERT_KIND: payload.kind,
+          WAM_ERROR_ALERT_MESSAGE: payload.message,
+          WAM_ERROR_ALERT_TIMESTAMP: String(payload.timestamp),
         },
       })
 
@@ -212,7 +212,7 @@ export class Alerter {
 
       if (child.stdin) {
         child.stdin.on('error', () => {
-          // Some alert commands don't read stdin; ignore EPIPE.
+          // Some error-alert commands don't read stdin; ignore EPIPE.
         })
         try {
           child.stdin.end(Buffer.from(json, 'utf-8'))
@@ -235,6 +235,6 @@ function formatError(err: unknown): string {
   return String(err)
 }
 
-export function defaultAlertStatePath(configDir: string): string {
-  return join(configDir, 'alert-state.json')
+export function defaultErrorAlertStatePath(configDir: string): string {
+  return join(configDir, 'error-alert-state.json')
 }

@@ -3,10 +3,10 @@ import { join } from 'path'
 import { createClient } from '../utils.js'
 import { Notifier } from '../../notifier.js'
 import { Dispatcher, type DispatchResult } from '../../dispatcher.js'
-import { resolveNotify, resolveAlerts, getConfigDir } from '../../config.js'
+import { resolveNotify, resolveErrorAlerts, getConfigDir } from '../../config.js'
 import { acquireLock } from '../../lockfile.js'
 import { writeRuntimeState, clearRuntimeState } from '../../runtime-state.js'
-import { Alerter, defaultAlertStatePath } from '../../alerts.js'
+import { ErrorAlerter, defaultErrorAlertStatePath } from '../../error-alerts.js'
 
 export const runCommand = new Command('run')
   .description('Run as a persistent listener. Streams messages from allowed chats and invokes notify.command (if configured).')
@@ -83,14 +83,14 @@ export const runCommand = new Command('run')
     logInfo(`quiet period: ${notifyResolved.quietPeriodSec}s (per chat)`)
     logInfo(`notify timeout: ${notifyResolved.timeoutSec === 0 ? 'disabled' : notifyResolved.timeoutSec + 's'}`)
 
-    const alertsResolved = resolveAlerts(config.alerts)
-    const alerter = new Alerter({
-      alerts: alertsResolved,
-      stateFile: defaultAlertStatePath(configDir),
+    const errorAlertsResolved = resolveErrorAlerts(config.errorAlerts)
+    const errorAlerter = new ErrorAlerter({
+      errorAlerts: errorAlertsResolved,
+      stateFile: defaultErrorAlertStatePath(configDir),
       onWarning: (msg) => console.error(`[warn] ${msg}`),
     })
-    if (alertsResolved.enabled) {
-      const t = alertsResolved.triggers
+    if (errorAlertsResolved.enabled) {
+      const t = errorAlertsResolved.triggers
       const triggersList: string[] = []
       if (t.conflict) triggersList.push('conflict')
       if (t.loggedOut) triggersList.push('loggedOut')
@@ -98,10 +98,10 @@ export const runCommand = new Command('run')
         triggersList.push(`extendedDisconnect(${t.extendedDisconnectAfterSec}s)`)
       if (t.dispatchFailuresAfter !== null)
         triggersList.push(`dispatchFailures(${t.dispatchFailuresAfter} consecutive)`)
-      logInfo(`alerts: enabled throttle=${alertsResolved.throttleSec}s triggers=[${triggersList.join(', ')}]`)
-      logInfo(`alerts log: ${alertsResolved.logFile}`)
+      logInfo(`error-alerts: enabled throttle=${errorAlertsResolved.throttleSec}s triggers=[${triggersList.join(', ')}]`)
+      logInfo(`error-alerts log: ${errorAlertsResolved.logFile}`)
     } else {
-      logInfo('alerts: disabled (no alerts.command configured) — nothing will notify the operator on service issues')
+      logInfo('error-alerts: disabled (no errorAlerts.command configured) — nothing will notify the operator on service issues')
     }
 
     const dispatcher = new Dispatcher({
@@ -127,7 +127,7 @@ export const runCommand = new Command('run')
         }
         // Update dispatch-failure counter. 'disabled' mode never "fails" —
         // we only track real dispatches (spawnError, timeout, non-zero exit).
-        const threshold = alertsResolved.triggers.dispatchFailuresAfter
+        const threshold = errorAlertsResolved.triggers.dispatchFailuresAfter
         if (result && result.mode !== 'disabled' && threshold !== null) {
           const failed = Boolean(
             result.spawnError || result.timedOut || (result.exitCode != null && result.exitCode !== 0)
@@ -140,7 +140,7 @@ export const runCommand = new Command('run')
                 : result.timedOut
                   ? `timed out after ${result.elapsedMs}ms`
                   : `exit=${result.exitCode}`
-              void alerter
+              void errorAlerter
                 .fire(
                   'dispatchFailures',
                   `${threshold} consecutive notify dispatches failed. Latest: ${detail}. Notifications are not reaching the agent.`,
@@ -156,7 +156,7 @@ export const runCommand = new Command('run')
                     },
                   }
                 )
-                .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+                .catch((err) => logInfo(`error-alert fire threw: ${formatError(err)}`))
             }
           } else {
             if (consecutiveDispatchFailures >= threshold) {
@@ -182,7 +182,7 @@ export const runCommand = new Command('run')
     }
     syncRuntimeState()
 
-    // Track time in non-connected state for the extendedDisconnect alert.
+    // Track time in non-connected state for the extendedDisconnect error alert.
     // We start "connected" optimistically because a freshly-started service
     // hasn't had a real opportunity to fail yet — the extended-disconnect
     // clock should start from the first time we're NOT connected.
@@ -197,23 +197,23 @@ export const runCommand = new Command('run')
         lastConnectedAt = Date.now()
         extendedDisconnectAlerted = false
       }
-      if (state === 'conflict' && alertsResolved.triggers.conflict) {
-        void alerter
+      if (state === 'conflict' && errorAlertsResolved.triggers.conflict) {
+        void errorAlerter
           .fire(
             'conflict',
             'WhatsApp Web stream conflict (status 440): another linked device has taken over this session slot. The monitor has stopped reconnecting until the competing session is closed. Please investigate and restart the service.',
             { reconnectAttempts: client.getReconnectAttempts() }
           )
-          .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+          .catch((err) => logInfo(`error-alert fire threw: ${formatError(err)}`))
       }
-      if (state === 'logged_out' && alertsResolved.triggers.loggedOut) {
-        void alerter
+      if (state === 'logged_out' && errorAlertsResolved.triggers.loggedOut) {
+        void errorAlerter
           .fire(
             'loggedOut',
             'WhatsApp session logged out. The monitor cannot reconnect until the device is re-linked. Run `whatsapp-monitor link` on the host.',
             {}
           )
-          .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+          .catch((err) => logInfo(`error-alert fire threw: ${formatError(err)}`))
       }
     })
 
@@ -237,11 +237,11 @@ export const runCommand = new Command('run')
       syncRuntimeState()
 
       // Extended-disconnect check. Fires once per disconnect episode
-      // (extendedDisconnectAlerted guard) + still throttled by the Alerter
-      // layer — so a flapping connection can't machine-gun alerts.
-      // Terminal states (conflict/logged_out) have their own alerts and
-      // are excluded here to avoid double-alerting.
-      const extendedThresholdSec = alertsResolved.triggers.extendedDisconnectAfterSec
+      // (extendedDisconnectAlerted guard) + still throttled by the
+      // ErrorAlerter layer — so a flapping connection can't machine-gun
+      // alerts. Terminal states (conflict/logged_out) have their own error
+      // alerts and are excluded here to avoid double-alerting.
+      const extendedThresholdSec = errorAlertsResolved.triggers.extendedDisconnectAfterSec
       if (
         extendedThresholdSec !== null &&
         !extendedDisconnectAlerted &&
@@ -252,7 +252,7 @@ export const runCommand = new Command('run')
         const disconnectedForSec = Math.round((Date.now() - lastConnectedAt) / 1000)
         if (disconnectedForSec >= extendedThresholdSec) {
           extendedDisconnectAlerted = true
-          void alerter
+          void errorAlerter
             .fire(
               'extendedDisconnect',
               `WhatsApp monitor has been disconnected for ${disconnectedForSec}s (threshold: ${extendedThresholdSec}s). Current state: ${state}. Reconnect attempts: ${client.getReconnectAttempts()}. The service is still trying but has not succeeded.`,
@@ -263,7 +263,7 @@ export const runCommand = new Command('run')
                 reconnectAttempts: client.getReconnectAttempts(),
               }
             )
-            .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+            .catch((err) => logInfo(`error-alert fire threw: ${formatError(err)}`))
         }
       }
     }, HEARTBEAT_MS)

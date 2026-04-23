@@ -13,13 +13,13 @@ A read-only WhatsApp **monitoring service** using Baileys. Runs as a persistent 
 - `src/types.ts` — TypeScript interfaces
 - `src/notifier.ts` — Per-chat quiet-period buffering (pure; no Baileys dep)
 - `src/dispatcher.ts` — Spawns `notify.command`, writes JSON to stdin, appends to JSONL log
-- `src/alerts.ts` — Operator-alert pipeline. Fires throttled, per-kind alerts via `alerts.command` when the service hits trouble (conflict, logged-out, extended disconnect, consecutive dispatch failures). Same shell-based contract as `notify.command`.
+- `src/error-alerts.ts` — Operator error-alert pipeline. Fires throttled, per-kind alerts via `errorAlerts.command` when the service hits trouble (conflict, logged-out, extended disconnect, consecutive dispatch failures). Same shell-based contract as `notify.command`.
 - `src/lockfile.ts` — PID-file lock (`~/.whatsapp-monitor/run.lock`) with stale-PID detection. Prevents two `run` processes from fighting over the same WhatsApp Web slot.
 - `src/runtime-state.ts` — Live runtime snapshot at `~/.whatsapp-monitor/runtime-state.json`. `run` writes it; `status` reads it (rejecting entries whose PID is dead) to surface the live connection state.
-- `src/cli/commands/run.ts` — The `run` command (persistent listener). Acquires the PID lock, wires crash guards (uncaughtException/unhandledRejection), owns the alert triggers, and emits a 5-min heartbeat log.
+- `src/cli/commands/run.ts` — The `run` command (persistent listener). Acquires the PID lock, wires crash guards (uncaughtException/unhandledRejection), owns the error-alert triggers, and emits a 5-min heartbeat log.
 - `src/cli/commands/status.ts` — Readiness + live-state probe used by operators and CI.
 - `src/cli/commands/notify.ts` — The `notify test` command
-- `src/cli/commands/alerts.ts` — The `alerts test` command
+- `src/cli/commands/error-alerts.ts` — The `error-alerts test` command
 - `src/cli/` — Commander CLI implementation
 - `skills/whatsapp-monitor/SKILL.md` — Agent-facing onboarding + operations skill (self-contained)
 
@@ -36,10 +36,10 @@ A read-only WhatsApp **monitoring service** using Baileys. Runs as a persistent 
 whatsapp-monitor run                 # Persistent listener (primary). Requires allowlist.
 whatsapp-monitor run -v              # Verbose
 whatsapp-monitor run --no-notify     # Skip notify.command; still write JSONL log
-whatsapp-monitor status              # Report link/allowlist/notify/alerts/log state; detect live `run` process. Exits 1 if not ready.
+whatsapp-monitor status              # Report link/allowlist/notify/error-alerts/log state; detect live `run` process. Exits 1 if not ready.
 whatsapp-monitor status --json       # Machine-readable status
 whatsapp-monitor notify test         # Fire one synthetic payload through notify.command
-whatsapp-monitor alerts test         # Fire one synthetic alert through alerts.command (bypasses throttle)
+whatsapp-monitor error-alerts test   # Fire one synthetic error alert through errorAlerts.command (bypasses throttle)
 whatsapp-monitor link                # QR code linking (default, interactive)
 whatsapp-monitor link --code --phone 12345678901
 whatsapp-monitor link --name "My Bot"
@@ -96,14 +96,14 @@ Config stored at `~/.whatsapp-monitor/config.json`. Two mutually-exclusive notif
 
 Setting both `command` and `kind` is a config error. See `skills/whatsapp-monitor/SKILL.md` for the full onboarding and field reference.
 
-### Alerts (operator notifications on service issues)
+### Error alerts (operator notifications on service issues)
 
-Orthogonal to `notify` — this is for the operator, not for forwarding messages. If the service hits trouble (WhatsApp stream conflict, logged-out, extended disconnect, repeated dispatch failures), `alerts.command` is invoked via `sh -c` with a short JSON describing the incident on stdin and `WAM_ALERT_*` env vars (`WAM_ALERT_KIND`, `WAM_ALERT_MESSAGE`, `WAM_ALERT_TIMESTAMP`).
+Orthogonal to `notify` — this is for the operator, not for forwarding messages. If the service hits trouble (WhatsApp stream conflict, logged-out, extended disconnect, repeated dispatch failures), `errorAlerts.command` is invoked via `sh -c` with a short JSON describing the incident on stdin and `WAM_ERROR_ALERT_*` env vars (`WAM_ERROR_ALERT_KIND`, `WAM_ERROR_ALERT_MESSAGE`, `WAM_ERROR_ALERT_TIMESTAMP`).
 
 ```json
 {
-  "alerts": {
-    "command": "openclaw agent --agent main --session-id wa-monitor-alerts --message \"whatsapp-monitor service alert — health signal for the monitor itself, NOT a WhatsApp message. Notify the user RIGHT NOW via their main messaging channel (Telegram/Slack/etc.). Kind: $WAM_ALERT_KIND. Details: $WAM_ALERT_MESSAGE\"",
+  "errorAlerts": {
+    "command": "openclaw agent --agent main --session-id wa-monitor-error-alerts --message \"whatsapp-monitor service error alert — health signal for the monitor itself, NOT a WhatsApp message. Notify the user RIGHT NOW via their main messaging channel (Telegram/Slack/etc.). Kind: $WAM_ERROR_ALERT_KIND. Details: $WAM_ERROR_ALERT_MESSAGE\"",
     "throttleSec": 900,
     "timeoutSec": 60,
     "on": {
@@ -116,11 +116,11 @@ Orthogonal to `notify` — this is for the operator, not for forwarding messages
 }
 ```
 
-The long `--message` preamble is deliberate: without it, an agent trained on message-content decisions in the main session may treat a service alert as a passive batch to drop.
+The long `--message` preamble is deliberate: without it, an agent trained on message-content decisions in the main session may treat an error alert as a passive batch to drop.
 
-Defaults when `alerts.command` is set: all four triggers on, 15 min per-kind throttle, 60s cmd timeout, log at `~/.whatsapp-monitor/alerts.jsonl`. Every fire attempt is appended to the log regardless of whether the shell command ran (durable record even when throttled). Throttling is per-kind — a flood of `dispatchFailures` alerts doesn't mute a subsequent `conflict` alert.
+Defaults when `errorAlerts.command` is set: all four triggers on, 15 min per-kind throttle, 60s cmd timeout, log at `~/.whatsapp-monitor/error-alerts.jsonl`. Every fire attempt is appended to the log regardless of whether the shell command ran (durable record even when throttled). Throttling is per-kind — a flood of `dispatchFailures` alerts doesn't mute a subsequent `conflict` alert.
 
-Alerts cannot detect the service crashing (no process to send from). For crash detection, use an external watchdog: a cron job or systemd timer that runs `whatsapp-monitor status --json` and fires the alert command itself when `runProcesses` is empty. See the skill for a recipe.
+Error alerts cannot detect the service crashing (no process to send from). For crash detection, use an external watchdog: a cron job or systemd timer that runs `whatsapp-monitor status --json` and fires the error-alert command itself when `runProcesses` is empty. See the skill for a recipe.
 
 ### Notify contract
 

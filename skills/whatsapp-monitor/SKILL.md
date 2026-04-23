@@ -142,7 +142,7 @@ Now ask the user how they want the agent to handle incoming messages. Phrase it 
 >
 > 1. **Relevance filter (recommended default)**: for every batch, you decide whether I'd care. If yes, ping me with a short summary right now. If not, drop it silently. Simple, stateless, no scheduled jobs.
 > 2. **Time-sensitive vs digest**: ping me immediately if it's urgent; otherwise add it to an end-of-day digest that gets sent on a schedule.
-> 3. **Keyword alert**: only ping me if the message mentions certain words (e.g. my name, 'tomorrow', 'urgent').
+> 3. **Keyword filter**: only ping me if the message mentions certain words (e.g. my name, 'tomorrow', 'urgent').
 > 4. **Always forward**: summarize and forward every batch.
 > 5. **Just log silently**: write it to memory so you can reference it later when I ask about it, but don't proactively tell me.
 >
@@ -159,7 +159,7 @@ cat > ~/.whatsapp-monitor/behavior.md <<'EOF'
 EOF
 ```
 
-Make the brief specific. "Tell me if urgent" is too vague. Good briefs include: what counts as urgent for this user, which chats are noisier and need a higher bar, what the "non-urgent" destination is (end-of-day summary, a memory note, nothing at all), and what format the user wants urgent alerts in.
+Make the brief specific. "Tell me if urgent" is too vague. Good briefs include: what counts as urgent for this user, which chats are noisier and need a higher bar, what the "non-urgent" destination is (end-of-day summary, a memory note, nothing at all), and what format the user wants the urgent notifications in.
 
 Confirm the brief with the user before continuing: read it back to them and ask "does this match what you want?"
 
@@ -170,7 +170,7 @@ Confirm the brief with the user before continuing: read it back to them and ask 
 
 **Record where the source of truth lives — important.** Once the brief is written, add a short entry to your own persistent memory index (e.g. `MEMORY.md` for Claude Code, or whatever your runtime uses) that says roughly:
 
-> WhatsApp monitoring is set up via the `whatsapp-monitor` service. The behavior brief — the rules for what to do with incoming WhatsApp batches — lives at `~/.whatsapp-monitor/behavior.md`. When the user gives feedback like "stop alerting me about the X group", "also alert on Y", "be quieter on weekends", etc., **edit that file** (not just the conversation), then reload the service (`launchctl unload+load` on macOS, `systemctl --user restart whatsapp-monitor` on Linux) so the next batch picks up the new rules. The session running the dispatched turns is named per the `notify.sessionIdTemplate` in `~/.whatsapp-monitor/config.json`.
+> WhatsApp monitoring is set up via the `whatsapp-monitor` service. The behavior brief — the rules for what to do with incoming WhatsApp batches — lives at `~/.whatsapp-monitor/behavior.md`. When the user gives feedback like "stop notifying me about the X group", "also ping me on Y", "be quieter on weekends", etc., **edit that file** (not just the conversation), then reload the service (`launchctl unload+load` on macOS, `systemctl --user restart whatsapp-monitor` on Linux) so the next batch picks up the new rules. The session running the dispatched turns is named per the `notify.sessionIdTemplate` in `~/.whatsapp-monitor/config.json`.
 
 Without this memory entry, future-you in a fresh conversation will respond to "stop notifying me about X" by trying to argue or take in-conversation notes, instead of editing the file the daemon actually reads.
 
@@ -255,7 +255,7 @@ Reminder: setting both `kind` and `command` in the same `notify` block is reject
 
 #### Where does the agent's reply go?
 
-By default, `openclaw agent` **prints its reply to stdout and does not deliver it anywhere**. With `notify.command` as above, the agent's response lands in the `whatsapp-monitor` service log (launchd/systemd stdout) — the user never sees it. That's the behavior you want: silent by default, the agent decides when to alert the user.
+By default, `openclaw agent` **prints its reply to stdout and does not deliver it anywhere**. With `notify.command` as above, the agent's response lands in the `whatsapp-monitor` service log (launchd/systemd stdout) — the user never sees it. That's the behavior you want: silent by default, the agent decides when to reach out to the user.
 
 **When the agent needs to reach the user, it must initiate that itself** — by calling one of its own configured messaging tools (Slack, Telegram, Discord, whatever). The behavior brief should say "call your Slack tool / Telegram tool to notify me," not "reply to me," so the agent doesn't think printing a reply is enough.
 
@@ -280,7 +280,7 @@ Relevant OpenClaw flags:
 | `--reply-to <target>` | Where inside the channel (a chat id, `#channel`, `@user`). Format depends on the channel — check `openclaw agent --help` or the channel's docs. |
 | `--reply-account <id>` | Which configured account in that channel (multi-account setups). |
 
-Prefer the structured-mode default (no `--deliver`) for the time-sensitive-vs-digest pattern. The agent's tool-calling gives finer-grained control than `--deliver` can — "alert only if urgent" is the agent's judgment call, not a daemon-level always-on flag.
+Prefer the structured-mode default (no `--deliver`) for the time-sensitive-vs-digest pattern. The agent's tool-calling gives finer-grained control than `--deliver` can — "notify only if urgent" is the agent's judgment call, not a daemon-level always-on flag.
 
 #### Test the pipeline
 
@@ -307,17 +307,19 @@ notify test (dry run)
 
 Exit code 0 means every step passed. Non-zero means at least one step failed — the `[fail]` line names which one (log append, spawn, non-zero exit, timeout). See Troubleshooting below.
 
-**What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end alert delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 5).
+**What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 5).
 
-### Step 4.5 — Configure operator alerts (recommended)
+### Step 4.5 — Configure operator error alerts (recommended)
 
-**What this is:** a separate pipeline from `notify`. `notify` forwards incoming WhatsApp messages to the agent as content. **Alerts** notify the operator (you/your agent) about **problems with the service itself**: the WhatsApp session hitting a stream conflict (440), being logged out, staying disconnected for an extended period, or the `notify.command` failing repeatedly. Without this configured, those problems only show up in logs — you'd never know until you notice messages have stopped arriving.
+> **Terminology** — "error alert" / "error-alerts" throughout this skill means a signal that the monitor *itself* is having trouble (session conflict, logged-out, disconnected, dispatch failures). Distinct from the `notify` pipeline in Step 4, which forwards WhatsApp message content. The two pipelines are independent: one tells the user about messages arriving, the other tells them when the service is broken.
+
+**What this is:** a separate pipeline from `notify`. `notify` forwards incoming WhatsApp messages to the agent as content. **Error alerts** notify the operator (you/your agent) about **problems with the service itself**: the WhatsApp session hitting a stream conflict (440), being logged out, staying disconnected for an extended period, or the `notify.command` failing repeatedly. Without this configured, those problems only show up in logs — you'd never know until you notice messages have stopped arriving.
 
 Ask the user:
 
-> "Do you want to be notified if the monitor itself runs into trouble? The common cases are: another device takes over the WhatsApp Web session, the session gets logged out, the service stays disconnected for more than ~10 minutes, or the agent pipeline keeps failing. **I recommend sending these alerts to the same agent as your notifications** — it already has context about the setup and can message you (via Telegram, Slack, whatever). It uses a separate session so service alerts don't pollute your message-notification session."
+> "Do you want to be alerted if the monitor itself runs into trouble? The common cases are: another device takes over the WhatsApp Web session, the session gets logged out, the service stays disconnected for more than ~10 minutes, or the agent pipeline keeps failing. **I recommend sending these error alerts to the same agent as your notifications** — it already has context about the setup and can message you (via Telegram, Slack, whatever). It uses a separate session so error alerts don't pollute your message-notification session."
 
-If the user agrees, add an `alerts` block to `~/.whatsapp-monitor/config.json`:
+If the user agrees, add an `errorAlerts` block to `~/.whatsapp-monitor/config.json`:
 
 ```json
 {
@@ -325,37 +327,37 @@ If the user agrees, add an `alerts` block to `~/.whatsapp-monitor/config.json`:
   "allowedContacts": ["..."],
   "authDir": "...",
   "notify": { ... },
-  "alerts": {
-    "command": "openclaw agent --agent <AGENT_ID> --session-id wa-monitor-alerts --message \"whatsapp-monitor service alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool you have that reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log and the user will not see it. Kind: $WAM_ALERT_KIND. Details: $WAM_ALERT_MESSAGE\"",
+  "errorAlerts": {
+    "command": "openclaw agent --agent <AGENT_ID> --session-id wa-monitor-error-alerts --message \"whatsapp-monitor service error alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool you have that reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log and the user will not see it. Kind: $WAM_ERROR_ALERT_KIND. Details: $WAM_ERROR_ALERT_MESSAGE\"",
     "throttleSec": 900,
     "timeoutSec": 60
   }
 }
 ```
 
-Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step 4 — same agent, different session id. All four triggers default to on when `alerts.command` is set.
+Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step 4 — same agent, different session id. All four triggers default to on when `errorAlerts.command` is set.
 
-**Why the long prefix in `--message`.** An agent configured for the main notify session is likely trained to "decide whether the user cares about this batch" and often silently drop noise. A service alert framed like a message batch might get dropped the same way. The preamble tells the agent explicitly that this is a *health* event, not content, and that it must actively call a messaging tool rather than reply. If the user is confident their agent's general memory already covers this (e.g. "in any session containing the string 'service alert' reach me on Telegram immediately"), they can simplify to a shorter `--message`.
+**Why the long prefix in `--message`.** An agent configured for the main notify session is likely trained to "decide whether the user cares about this batch" and often silently drop noise. An error alert framed like a message batch might get dropped the same way. The preamble tells the agent explicitly that this is a *health* event, not content, and that it must actively call a messaging tool rather than reply. If the user is confident their agent's general memory already covers this (e.g. "in any session containing the string 'error alert' reach me on Telegram immediately"), they can simplify to a shorter `--message`.
 
 **Field reference:**
 
-- **`alerts.command`** — shell command run via `sh -c` for every alert fire. Receives the full alert JSON on stdin; also gets `WAM_ALERT_KIND`, `WAM_ALERT_MESSAGE`, `WAM_ALERT_TIMESTAMP` env vars for shell-conditional use.
-- **`alerts.throttleSec`** (default `900` = 15 min) — per-kind throttle. The same kind of alert won't fire twice within this window. Different kinds (e.g. `conflict` then `loggedOut`) are independent.
-- **`alerts.timeoutSec`** (default `60`) — max time the child command can run. SIGTERM, 2s grace, SIGKILL.
-- **`alerts.logFile`** (default `~/.whatsapp-monitor/alerts.jsonl`) — every fire attempt is appended here, whether or not the child was invoked (throttled alerts are logged but not sent). Durable record for postmortems.
-- **`alerts.on`** — per-trigger switches. All default to on when the command is set. To disable one: `"conflict": false`. To change extended-disconnect threshold: `"extendedDisconnect": { "afterSec": 300 }`. To change dispatch-failures threshold: `"dispatchFailures": { "afterConsecutive": 3 }`.
+- **`errorAlerts.command`** — shell command run via `sh -c` for every error-alert fire. Receives the full alert JSON on stdin; also gets `WAM_ERROR_ALERT_KIND`, `WAM_ERROR_ALERT_MESSAGE`, `WAM_ERROR_ALERT_TIMESTAMP` env vars for shell-conditional use.
+- **`errorAlerts.throttleSec`** (default `900` = 15 min) — per-kind throttle. The same kind of error alert won't fire twice within this window. Different kinds (e.g. `conflict` then `loggedOut`) are independent.
+- **`errorAlerts.timeoutSec`** (default `60`) — max time the child command can run. SIGTERM, 2s grace, SIGKILL.
+- **`errorAlerts.logFile`** (default `~/.whatsapp-monitor/error-alerts.jsonl`) — every fire attempt is appended here, whether or not the child was invoked (throttled alerts are logged but not sent). Durable record for postmortems.
+- **`errorAlerts.on`** — per-trigger switches. All default to on when the command is set. To disable one: `"conflict": false`. To change extended-disconnect threshold: `"extendedDisconnect": { "afterSec": 300 }`. To change dispatch-failures threshold: `"dispatchFailures": { "afterConsecutive": 3 }`.
 
-**Briefing the agent further (optional).** The preamble in `--message` above is usually enough. If the user wants belt-and-suspenders, add a short note to the agent's general memory (not the monitor's behavior.md — that one is for message-content decisions): "Any turn in session `wa-monitor-alerts` is a service-health alert. Relay it to me via my Telegram tool immediately." This helps if the preamble ever gets shortened.
+**Briefing the agent further (optional).** The preamble in `--message` above is usually enough. If the user wants belt-and-suspenders, add a short note to the agent's general memory (not the monitor's behavior.md — that one is for message-content decisions): "Any turn in session `wa-monitor-error-alerts` is a service-health error alert. Relay it to me via my Telegram tool immediately." This helps if the preamble ever gets shortened.
 
 Verify the wiring:
 
 ```bash
-whatsapp-monitor alerts test
+whatsapp-monitor error-alerts test
 ```
 
-This fires a synthetic alert through the pipeline (bypassing throttle). A healthy result is `[result] ok` and the user getting a test notification in whatever channel the agent is configured to use.
+This fires a synthetic error alert through the pipeline (bypassing throttle). A healthy result is `[result] ok` and the user getting a test notification in whatever channel the agent is configured to use.
 
-**Crash detection is separate.** In-process alerts can't detect the service process crashing — by definition there's no one to send from. For that you need an external watchdog. See [External watchdog](#external-watchdog-for-crash-detection) below.
+**Crash detection is separate.** In-process error alerts can't detect the service process crashing — by definition there's no one to send from. For that you need an external watchdog. See [External watchdog](#external-watchdog-for-crash-detection) below.
 
 ### Step 5 — Run the service under a process manager
 
@@ -408,7 +410,7 @@ launchctl load ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
 systemctl --user restart whatsapp-monitor
 ```
 
-Now send a message from another device to an allowlisted chat. Within ~5 seconds you should see the flush in the service log and (if the behavior brief said to alert) the agent reaching out via its messaging tool.
+Now send a message from another device to an allowlisted chat. Within ~5 seconds you should see the flush in the service log and (if the behavior brief said to notify) the agent reaching out via its messaging tool.
 
 Once verified, restore the production value:
 
@@ -457,8 +459,8 @@ Fires one synthetic payload through the configured notifier (`notify.command` or
 
 | Command | Purpose |
 |---|---|
-| `whatsapp-monitor status [--json]` | One-shot readiness check: linked, allowlist, notify config, alerts config, live `run` process + its live connection state (connected / connecting / disconnected / conflict / logged_out), last dispatched notification, last fired alert. Exits non-zero if not ready or if the live state is `conflict` / `logged_out`. |
-| `whatsapp-monitor alerts test` | Fire a synthetic alert through `alerts.command` (throttle bypassed). Verify the operator-alert pipeline. |
+| `whatsapp-monitor status [--json]` | One-shot readiness check: linked, allowlist, notify config, error-alerts config, live `run` process + its live connection state (connected / connecting / disconnected / conflict / logged_out), last dispatched notification, last fired error alert. Exits non-zero if not ready or if the live state is `conflict` / `logged_out`. |
+| `whatsapp-monitor error-alerts test` | Fire a synthetic error alert through `errorAlerts.command` (throttle bypassed). Verify the operator error-alert pipeline. |
 | `whatsapp-monitor link [--qr\|--code --phone <num>] [--name <str>] [--reset]` | Link WhatsApp account |
 | `whatsapp-monitor groups [--json]` | List groups with their IDs |
 | `whatsapp-monitor config list` | Show current allowlist and notify config |
@@ -519,16 +521,16 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 | `notify.timeoutSec` | `120` | Hard cap on child process runtime. SIGTERM then 2s grace then SIGKILL. `0` disables. |
 | `notify.logFile` | `~/.whatsapp-monitor/notifications.jsonl` | Where each payload is appended regardless of command outcome. |
 | `notify.maxBufferedPerChat` | `50` | Safety cap; forces a flush if reached. |
-| `alerts.command` | _(none)_ | Shell command invoked via `sh -c` when a service issue fires. Receives alert JSON on stdin and `WAM_ALERT_KIND` / `WAM_ALERT_MESSAGE` / `WAM_ALERT_TIMESTAMP` env vars. Setting this enables alerts; leaving it unset disables the pipeline entirely. |
-| `alerts.throttleSec` | `900` | Per-kind throttle window (seconds). Same-kind alerts within this window append to the log but don't run the shell command. |
-| `alerts.timeoutSec` | `60` | Hard cap on child runtime. SIGTERM → 2s grace → SIGKILL. `0` disables. |
-| `alerts.logFile` | `~/.whatsapp-monitor/alerts.jsonl` | Every fire attempt (fired or throttled) is appended here. |
-| `alerts.on.conflict` | `true` | Fire on WhatsApp stream conflict (status 440). |
-| `alerts.on.loggedOut` | `true` | Fire when WhatsApp reports the session is logged out. |
-| `alerts.on.extendedDisconnect` | `{ afterSec: 600 }` | Fire when the monitor has been in a non-connected state for this many seconds. Set to `false` to disable. |
-| `alerts.on.dispatchFailures` | `{ afterConsecutive: 5 }` | Fire after this many consecutive `notify` dispatch failures (spawn error / non-zero exit / timeout). Resets on the first successful dispatch. Set to `false` to disable. |
+| `errorAlerts.command` | _(none)_ | Shell command invoked via `sh -c` when a service issue fires. Receives error-alert JSON on stdin and `WAM_ERROR_ALERT_KIND` / `WAM_ERROR_ALERT_MESSAGE` / `WAM_ERROR_ALERT_TIMESTAMP` env vars. Setting this enables error alerts; leaving it unset disables the pipeline entirely. |
+| `errorAlerts.throttleSec` | `900` | Per-kind throttle window (seconds). Same-kind alerts within this window append to the log but don't run the shell command. |
+| `errorAlerts.timeoutSec` | `60` | Hard cap on child runtime. SIGTERM → 2s grace → SIGKILL. `0` disables. |
+| `errorAlerts.logFile` | `~/.whatsapp-monitor/error-alerts.jsonl` | Every fire attempt (fired or throttled) is appended here. |
+| `errorAlerts.on.conflict` | `true` | Fire on WhatsApp stream conflict (status 440). |
+| `errorAlerts.on.loggedOut` | `true` | Fire when WhatsApp reports the session is logged out. |
+| `errorAlerts.on.extendedDisconnect` | `{ afterSec: 600 }` | Fire when the monitor has been in a non-connected state for this many seconds. Set to `false` to disable. |
+| `errorAlerts.on.dispatchFailures` | `{ afterConsecutive: 5 }` | Fire after this many consecutive `notify` dispatch failures (spawn error / non-zero exit / timeout). Resets on the first successful dispatch. Set to `false` to disable. |
 
-### Alert payload shape
+### Error-alert payload shape
 
 ```jsonc
 {
@@ -541,7 +543,7 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 }
 ```
 
-Written to the child's stdin as one line of JSON. The env vars `WAM_ALERT_KIND`, `WAM_ALERT_MESSAGE`, `WAM_ALERT_TIMESTAMP` let shell commands use simple conditionals without parsing JSON.
+Written to the child's stdin as one line of JSON. The env vars `WAM_ERROR_ALERT_KIND`, `WAM_ERROR_ALERT_MESSAGE`, `WAM_ERROR_ALERT_TIMESTAMP` let shell commands use simple conditionals without parsing JSON.
 
 ### Notification payload shape
 
@@ -608,9 +610,9 @@ Either way, there are no markers or priming state to clean up when you change ca
 
 Drop one of these into `~/.whatsapp-monitor/behavior.md` (or adapt to the user's actual preference) in Step 3.
 
-> **Important phrasing note**: the agent's textual reply to `openclaw agent --message ...` goes to the service log, not to the user. When the brief says "notify me" or "alert me," the agent must call one of its own configured messaging tools (Slack, Telegram, etc.) to reach the user — a plain reply is invisible. Phrase alert instructions as **"call your <Slack/Telegram/whatever> tool"** so the agent doesn't assume its reply is enough.
+> **Important phrasing note**: the agent's textual reply to `openclaw agent --message ...` goes to the service log, not to the user. When the brief says "notify me", "ping me", or "tell me," the agent must call one of its own configured messaging tools (Slack, Telegram, etc.) to reach the user — a plain reply is invisible. Phrase such instructions as **"call your <Slack/Telegram/whatever> tool"** so the agent doesn't assume its reply is enough.
 
-> **Test-noise rule worth including in every brief**: if a batch is obviously a self-sent test — single short message from the user's own contact id, content like "test", "בדיקה", "ping", "check", or similar — drop it. Don't alert, don't add it to the digest. Self-tests aren't signal and clutter end-of-day summaries.
+> **Test-noise rule worth including in every brief**: if a batch is obviously a self-sent test — single short message from the user's own contact id, content like "test", "בדיקה", "ping", "check", or similar — drop it. Don't notify, don't add it to the digest. Self-tests aren't signal and clutter end-of-day summaries.
 
 **Example A — relevance filter (recommended default)**:
 
@@ -647,7 +649,7 @@ For each batch of messages that arrives in this session:
 
    Everything else is non-urgent.
 
-2. If **urgent**: call your Telegram tool (or whichever messaging tool reaches me) to send a short alert right now — one or two sentences summarizing what's going on and from whom. Do NOT rely on your text reply alone; it goes to a log, not to me.
+2. If **urgent**: call your Telegram tool (or whichever messaging tool reaches me) to send me a short ping right now — one or two sentences summarizing what's going on and from whom. Do NOT rely on your text reply alone; it goes to a log, not to me.
 
 3. If **non-urgent**: silently append a one-line entry to a memory note named "WhatsApp digest — YYYY-MM-DD" (one note per local day; create it on the first non-urgent batch of the day). Do not message me about it.
 
@@ -656,12 +658,12 @@ For each batch of messages that arrives in this session:
 **End-of-day delivery (active):** the digest should reach me on its own each evening, not wait for me to ask. If a scheduled job doesn't already do this for me, suggest one now — for example, a cron entry that runs `openclaw agent --agent <my-agent> --message "Send me today's WhatsApp digest now via my Telegram tool"` at 21:00 local time. Confirm with me whether it's already set up before assuming.
 ```
 
-**Example C — keyword alert only:**
+**Example C — keyword filter only:**
 
 ```markdown
 # whatsapp-monitor behavior
 
-Only act when a message mentions any of: my name "Amit", "tomorrow", "urgent", or "kids". For any such batch, call your Telegram tool to send me a short alert.
+Only act when a message mentions any of: my name "Amit", "tomorrow", "urgent", or "kids". For any such batch, call your Telegram tool to send me a short ping.
 
 For everything else, do nothing — don't log, don't summarize, don't call any tool. Your text reply in this session goes to a log I never read, so silence is fine.
 ```
@@ -678,7 +680,7 @@ Do not proactively contact me about WhatsApp batches. For every batch, write a s
 
 The recipes in this section apply **only to command mode**. Structured mode (`notify.kind: "openclaw-agent"`) has no shell hook between the daemon and `openclaw agent` — if you need shell-level filtering, switch to command mode, or do the filtering in the behavior brief so the agent decides.
 
-For hard cutoffs where you never want to spend an agent turn at all — obvious noise, wrong chat type, keyword-only alerting — guard `notify.command` with a shell conditional. The convenience env vars (`WAM_IS_GROUP`, `WAM_CHAT_ID`, etc.) make this cheap:
+For hard cutoffs where you never want to spend an agent turn at all — obvious noise, wrong chat type, keyword-only notifications — guard `notify.command` with a shell conditional. The convenience env vars (`WAM_IS_GROUP`, `WAM_CHAT_ID`, etc.) make this cheap:
 
 ```json
 // Only forward group messages, drop DMs entirely
@@ -780,9 +782,9 @@ journalctl --user -u whatsapp-monitor -f   # logs
 
 ### External watchdog (for crash detection)
 
-The in-process alerts pipeline (Step 4.5) covers `conflict`, `loggedOut`, `extendedDisconnect`, and `dispatchFailures`. It **cannot** cover a process crash — a killed or OOM'd `run` process can't send its own alert. For that, run a short cron job / systemd timer that polls `whatsapp-monitor status --json` and fires `alerts.command` itself when the service is down.
+The in-process error-alerts pipeline (Step 4.5) covers `conflict`, `loggedOut`, `extendedDisconnect`, and `dispatchFailures`. It **cannot** cover a process crash — a killed or OOM'd `run` process can't send its own alert. For that, run a short cron job / systemd timer that polls `whatsapp-monitor status --json` and fires `errorAlerts.command` itself when the service is down.
 
-Only set this up if Step 4.5 is done — the watchdog reuses the same `alerts.command`.
+Only set this up if Step 4.5 is done — the watchdog reuses the same `errorAlerts.command`.
 
 **cron (every 5 min):**
 
@@ -793,7 +795,7 @@ crontab -e
 Add:
 
 ```
-*/5 * * * * /usr/local/bin/whatsapp-monitor status --json 2>/dev/null | /usr/bin/jq -e '.runProcesses | length > 0' >/dev/null || openclaw agent --agent <AGENT_ID> --session-id wa-monitor-alerts --message "whatsapp-monitor service alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log. Kind: crash. Details: whatsapp-monitor run process is not alive on host $(hostname)."
+*/5 * * * * /usr/local/bin/whatsapp-monitor status --json 2>/dev/null | /usr/bin/jq -e '.runProcesses | length > 0' >/dev/null || openclaw agent --agent <AGENT_ID> --session-id wa-monitor-error-alerts --message "whatsapp-monitor service error alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log. Kind: crash. Details: whatsapp-monitor run process is not alive on host $(hostname)."
 ```
 
 Adjust the `whatsapp-monitor` and `jq` paths per `which whatsapp-monitor` / `which jq`, and substitute `<AGENT_ID>`.
@@ -808,8 +810,8 @@ Adjust the `whatsapp-monitor` and `jq` paths per `which whatsapp-monitor` / `whi
 
 Two notes:
 
-- Set the watchdog to the **same `<AGENT_ID>` and session id** as the in-process alerts so the agent sees both kinds in one session. Avoids the agent being confused by split context.
-- The watchdog adds coverage, it doesn't replace the in-process alerts — the two catch different failure modes. Run both.
+- Set the watchdog to the **same `<AGENT_ID>` and session id** as the in-process error alerts so the agent sees both kinds in one session. Avoids the agent being confused by split context.
+- The watchdog adds coverage, it doesn't replace the in-process error alerts — the two catch different failure modes. Run both.
 
 ---
 
@@ -835,7 +837,7 @@ Interpret the final status line:
 
 ### Session conflict — `status` reports `✗ session conflict (440)`
 
-Symptoms: `whatsapp-monitor status` shows `State: ✗ session conflict (440 — another WhatsApp Web device took over)`, and the service log shows `connection closed: reason=streamConflict(440) ... willReconnect=false` followed by `not reconnecting: session conflict (status 440)`. The service is still running (doesn't crash) but has stopped reconnecting. If the `alerts` pipeline is configured (Step 4.5), the agent should have pinged the user about it already.
+Symptoms: `whatsapp-monitor status` shows `State: ✗ session conflict (440 — another WhatsApp Web device took over)`, and the service log shows `connection closed: reason=streamConflict(440) ... willReconnect=false` followed by `not reconnecting: session conflict (status 440)`. The service is still running (doesn't crash) but has stopped reconnecting. If the `errorAlerts` pipeline is configured (Step 4.5), the agent should have pinged the user about it already.
 
 What it means: WhatsApp's server allows only one live connection per linked-device slot. Another process using the same credentials claimed the slot, so the server kicked this connection. Retrying would just rotate who holds the slot — the cause must be resolved first.
 

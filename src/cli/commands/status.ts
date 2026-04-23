@@ -7,7 +7,7 @@ import { join } from 'path'
 import {
   loadConfig,
   resolveNotify,
-  resolveAlerts,
+  resolveErrorAlerts,
   hasExistingAuth,
   getConfigPath,
   getConfigDir,
@@ -15,7 +15,7 @@ import {
 } from '../../config.js'
 import type {
   NotificationPayload,
-  ResolvedAlerts,
+  ResolvedErrorAlerts,
   ResolvedNotify,
   ConnectionState,
 } from '../../types.js'
@@ -82,7 +82,7 @@ interface StatusReport {
   log: LogSummary
   runProcesses: RunProcess[]
   live: LiveState | null
-  alerts:
+  errorAlerts:
     | { enabled: false }
     | {
         enabled: true
@@ -175,8 +175,8 @@ async function buildStatus(): Promise<StatusReport> {
     blockers.push('WhatsApp session logged out — re-run `whatsapp-monitor link`')
   }
 
-  const alerts = resolveAlerts(config?.alerts)
-  const alertsSection = await summarizeAlerts(alerts)
+  const errorAlerts = resolveErrorAlerts(config?.errorAlerts)
+  const errorAlertsSection = await summarizeErrorAlerts(errorAlerts)
 
   const ready = !configError && linked && !empty && !notifyError
 
@@ -189,19 +189,19 @@ async function buildStatus(): Promise<StatusReport> {
     log,
     runProcesses,
     live,
-    alerts: alertsSection,
+    errorAlerts: errorAlertsSection,
     ready,
     blockers,
   }
 }
 
-async function summarizeAlerts(alerts: ResolvedAlerts): Promise<StatusReport['alerts']> {
-  if (!alerts.enabled) return { enabled: false }
-  const logExists = existsSync(alerts.logFile)
+async function summarizeErrorAlerts(errorAlerts: ResolvedErrorAlerts): Promise<StatusReport['errorAlerts']> {
+  if (!errorAlerts.enabled) return { enabled: false }
+  const logExists = existsSync(errorAlerts.logFile)
   let lastEntryAt: number | undefined
   if (logExists) {
     try {
-      const content = await readFile(alerts.logFile, 'utf-8')
+      const content = await readFile(errorAlerts.logFile, 'utf-8')
       const lines = content.split('\n').filter((l) => l.trim() !== '')
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
@@ -220,13 +220,13 @@ async function summarizeAlerts(alerts: ResolvedAlerts): Promise<StatusReport['al
   }
   return {
     enabled: true,
-    command: alerts.command,
-    throttleSec: alerts.throttleSec,
-    timeoutSec: alerts.timeoutSec,
-    logFile: alerts.logFile,
+    command: errorAlerts.command,
+    throttleSec: errorAlerts.throttleSec,
+    timeoutSec: errorAlerts.timeoutSec,
+    logFile: errorAlerts.logFile,
     logExists,
     lastEntryAt,
-    triggers: alerts.triggers,
+    triggers: errorAlerts.triggers,
   }
 }
 
@@ -389,14 +389,14 @@ function printHuman(r: StatusReport): void {
   }
 
   console.log('')
-  console.log('Alerts (operator notifications on service issues):')
-  if (!r.alerts.enabled) {
-    console.log('  Mode: disabled (no alerts.command configured)')
+  console.log('Error alerts (operator notifications on service issues):')
+  if (!r.errorAlerts.enabled) {
+    console.log('  Mode: disabled (no errorAlerts.command configured)')
     console.log('  Note: service issues like session conflict, logged-out, or extended')
-    console.log('        disconnect will only surface in logs. Configure alerts.command')
+    console.log('        disconnect will only surface in logs. Configure errorAlerts.command')
     console.log('        in ~/.whatsapp-monitor/config.json to get notified.')
   } else {
-    const a = r.alerts
+    const a = r.errorAlerts
     console.log(`  Command:       ${a.command}`)
     console.log(`  Throttle:      ${a.throttleSec}s (per-kind)`)
     console.log(`  Timeout:       ${a.timeoutSec === 0 ? 'disabled' : a.timeoutSec + 's'}`)

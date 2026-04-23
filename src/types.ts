@@ -12,14 +12,14 @@ export interface NotifyConfig {
   maxBufferedPerChat?: number
 }
 
-export type AlertKind =
+export type ErrorAlertKind =
   | 'conflict'
   | 'loggedOut'
   | 'extendedDisconnect'
   | 'dispatchFailures'
   | 'test'
 
-export interface AlertsConfig {
+export interface ErrorAlertsConfig {
   command?: string
   throttleSec?: number
   timeoutSec?: number
@@ -32,7 +32,7 @@ export interface AlertsConfig {
   }
 }
 
-export interface ResolvedAlerts {
+export interface ResolvedErrorAlerts {
   enabled: boolean
   command: string
   throttleSec: number
@@ -46,8 +46,8 @@ export interface ResolvedAlerts {
   }
 }
 
-export interface AlertPayload {
-  kind: AlertKind
+export interface ErrorAlertPayload {
+  kind: ErrorAlertKind
   message: string
   timestamp: number
   details?: Record<string, unknown>
@@ -83,7 +83,7 @@ export interface MonitorConfig {
   allowedContacts: string[]
   authDir: string
   notify?: NotifyConfig
-  alerts?: AlertsConfig
+  errorAlerts?: ErrorAlertsConfig
 }
 
 export interface NotificationPayload {
