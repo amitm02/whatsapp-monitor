@@ -3,9 +3,10 @@ import { join } from 'path'
 import { createClient } from '../utils.js'
 import { Notifier } from '../../notifier.js'
 import { Dispatcher, type DispatchResult } from '../../dispatcher.js'
-import { resolveNotify, getConfigDir } from '../../config.js'
+import { resolveNotify, resolveAlerts, getConfigDir } from '../../config.js'
 import { acquireLock } from '../../lockfile.js'
 import { writeRuntimeState, clearRuntimeState } from '../../runtime-state.js'
+import { Alerter, defaultAlertStatePath } from '../../alerts.js'
 
 export const runCommand = new Command('run')
   .description('Run as a persistent listener. Streams messages from allowed chats and invokes notify.command (if configured).')
@@ -82,6 +83,27 @@ export const runCommand = new Command('run')
     logInfo(`quiet period: ${notifyResolved.quietPeriodSec}s (per chat)`)
     logInfo(`notify timeout: ${notifyResolved.timeoutSec === 0 ? 'disabled' : notifyResolved.timeoutSec + 's'}`)
 
+    const alertsResolved = resolveAlerts(config.alerts)
+    const alerter = new Alerter({
+      alerts: alertsResolved,
+      stateFile: defaultAlertStatePath(configDir),
+      onWarning: (msg) => console.error(`[warn] ${msg}`),
+    })
+    if (alertsResolved.enabled) {
+      const t = alertsResolved.triggers
+      const triggersList: string[] = []
+      if (t.conflict) triggersList.push('conflict')
+      if (t.loggedOut) triggersList.push('loggedOut')
+      if (t.extendedDisconnectAfterSec !== null)
+        triggersList.push(`extendedDisconnect(${t.extendedDisconnectAfterSec}s)`)
+      if (t.dispatchFailuresAfter !== null)
+        triggersList.push(`dispatchFailures(${t.dispatchFailuresAfter} consecutive)`)
+      logInfo(`alerts: enabled throttle=${alertsResolved.throttleSec}s triggers=[${triggersList.join(', ')}]`)
+      logInfo(`alerts log: ${alertsResolved.logFile}`)
+    } else {
+      logInfo('alerts: disabled (no alerts.command configured) — nothing will notify the operator on service issues')
+    }
+
     const dispatcher = new Dispatcher({
       notify: notifyResolved,
       verbose,
@@ -89,6 +111,7 @@ export const runCommand = new Command('run')
       onInfo: logInfo,
     })
 
+    let consecutiveDispatchFailures = 0
     const notifier = new Notifier({
       quietPeriodSec: notifyResolved.quietPeriodSec,
       maxBufferedPerChat: notifyResolved.maxBufferedPerChat,
@@ -101,6 +124,46 @@ export const runCommand = new Command('run')
         const result = await dispatcher.dispatch(payload)
         if (result) {
           logFlushResult(logInfo, result)
+        }
+        // Update dispatch-failure counter. 'disabled' mode never "fails" —
+        // we only track real dispatches (spawnError, timeout, non-zero exit).
+        const threshold = alertsResolved.triggers.dispatchFailuresAfter
+        if (result && result.mode !== 'disabled' && threshold !== null) {
+          const failed = Boolean(
+            result.spawnError || result.timedOut || (result.exitCode != null && result.exitCode !== 0)
+          )
+          if (failed) {
+            consecutiveDispatchFailures++
+            if (consecutiveDispatchFailures === threshold) {
+              const detail = result.spawnError
+                ? `spawn error: ${result.spawnError}`
+                : result.timedOut
+                  ? `timed out after ${result.elapsedMs}ms`
+                  : `exit=${result.exitCode}`
+              void alerter
+                .fire(
+                  'dispatchFailures',
+                  `${threshold} consecutive notify dispatches failed. Latest: ${detail}. Notifications are not reaching the agent.`,
+                  {
+                    consecutiveFailures: consecutiveDispatchFailures,
+                    lastResult: {
+                      mode: result.mode,
+                      exitCode: result.exitCode,
+                      signal: result.signal,
+                      timedOut: result.timedOut,
+                      spawnError: result.spawnError,
+                      stderrPreview: result.stderrPreview,
+                    },
+                  }
+                )
+                .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+            }
+          } else {
+            if (consecutiveDispatchFailures >= threshold) {
+              logInfo(`dispatch recovered after ${consecutiveDispatchFailures} failure(s)`)
+            }
+            consecutiveDispatchFailures = 0
+          }
         }
       },
       onError: (err, ctx) => console.error(`[warn] notifier error in ${ctx}: ${formatError(err)}`),
@@ -119,9 +182,39 @@ export const runCommand = new Command('run')
     }
     syncRuntimeState()
 
+    // Track time in non-connected state for the extendedDisconnect alert.
+    // We start "connected" optimistically because a freshly-started service
+    // hasn't had a real opportunity to fail yet — the extended-disconnect
+    // clock should start from the first time we're NOT connected.
+    let lastConnectedAt = Date.now()
+    let extendedDisconnectAlerted = false
+
     client.onConnection((state) => {
       logInfo(`connection: ${state}`)
       syncRuntimeState()
+
+      if (state === 'connected') {
+        lastConnectedAt = Date.now()
+        extendedDisconnectAlerted = false
+      }
+      if (state === 'conflict' && alertsResolved.triggers.conflict) {
+        void alerter
+          .fire(
+            'conflict',
+            'WhatsApp Web stream conflict (status 440): another linked device has taken over this session slot. The monitor has stopped reconnecting until the competing session is closed. Please investigate and restart the service.',
+            { reconnectAttempts: client.getReconnectAttempts() }
+          )
+          .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+      }
+      if (state === 'logged_out' && alertsResolved.triggers.loggedOut) {
+        void alerter
+          .fire(
+            'loggedOut',
+            'WhatsApp session logged out. The monitor cannot reconnect until the device is re-linked. Run `whatsapp-monitor link` on the host.',
+            {}
+          )
+          .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+      }
     })
 
     client.onReady(() => {
@@ -142,6 +235,37 @@ export const runCommand = new Command('run')
       const idleSec = Math.round(idleMs / 1000)
       logInfo(`heartbeat: state=${state} idleSince=${idleSec}s lastActivity=${new Date(client.getLastActivityAt()).toISOString()}`)
       syncRuntimeState()
+
+      // Extended-disconnect check. Fires once per disconnect episode
+      // (extendedDisconnectAlerted guard) + still throttled by the Alerter
+      // layer — so a flapping connection can't machine-gun alerts.
+      // Terminal states (conflict/logged_out) have their own alerts and
+      // are excluded here to avoid double-alerting.
+      const extendedThresholdSec = alertsResolved.triggers.extendedDisconnectAfterSec
+      if (
+        extendedThresholdSec !== null &&
+        !extendedDisconnectAlerted &&
+        state !== 'connected' &&
+        state !== 'conflict' &&
+        state !== 'logged_out'
+      ) {
+        const disconnectedForSec = Math.round((Date.now() - lastConnectedAt) / 1000)
+        if (disconnectedForSec >= extendedThresholdSec) {
+          extendedDisconnectAlerted = true
+          void alerter
+            .fire(
+              'extendedDisconnect',
+              `WhatsApp monitor has been disconnected for ${disconnectedForSec}s (threshold: ${extendedThresholdSec}s). Current state: ${state}. Reconnect attempts: ${client.getReconnectAttempts()}. The service is still trying but has not succeeded.`,
+              {
+                disconnectedForSec,
+                thresholdSec: extendedThresholdSec,
+                state,
+                reconnectAttempts: client.getReconnectAttempts(),
+              }
+            )
+            .catch((err) => logInfo(`alert fire threw: ${formatError(err)}`))
+        }
+      }
     }, HEARTBEAT_MS)
     if (heartbeat.unref) heartbeat.unref()
 

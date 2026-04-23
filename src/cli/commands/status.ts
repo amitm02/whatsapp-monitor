@@ -7,12 +7,18 @@ import { join } from 'path'
 import {
   loadConfig,
   resolveNotify,
+  resolveAlerts,
   hasExistingAuth,
   getConfigPath,
   getConfigDir,
   NotifyConfigError,
 } from '../../config.js'
-import type { NotificationPayload, ResolvedNotify, ConnectionState } from '../../types.js'
+import type {
+  NotificationPayload,
+  ResolvedAlerts,
+  ResolvedNotify,
+  ConnectionState,
+} from '../../types.js'
 import { readLiveRuntimeState, type RuntimeState } from '../../runtime-state.js'
 
 const execFileAsync = promisify(execFile)
@@ -76,6 +82,23 @@ interface StatusReport {
   log: LogSummary
   runProcesses: RunProcess[]
   live: LiveState | null
+  alerts:
+    | { enabled: false }
+    | {
+        enabled: true
+        command: string
+        throttleSec: number
+        timeoutSec: number
+        logFile: string
+        logExists: boolean
+        lastEntryAt?: number
+        triggers: {
+          conflict: boolean
+          loggedOut: boolean
+          extendedDisconnectAfterSec: number | null
+          dispatchFailuresAfter: number | null
+        }
+      }
   ready: boolean
   blockers: string[]
 }
@@ -152,6 +175,9 @@ async function buildStatus(): Promise<StatusReport> {
     blockers.push('WhatsApp session logged out — re-run `whatsapp-monitor link`')
   }
 
+  const alerts = resolveAlerts(config?.alerts)
+  const alertsSection = await summarizeAlerts(alerts)
+
   const ready = !configError && linked && !empty && !notifyError
 
   return {
@@ -163,8 +189,44 @@ async function buildStatus(): Promise<StatusReport> {
     log,
     runProcesses,
     live,
+    alerts: alertsSection,
     ready,
     blockers,
+  }
+}
+
+async function summarizeAlerts(alerts: ResolvedAlerts): Promise<StatusReport['alerts']> {
+  if (!alerts.enabled) return { enabled: false }
+  const logExists = existsSync(alerts.logFile)
+  let lastEntryAt: number | undefined
+  if (logExists) {
+    try {
+      const content = await readFile(alerts.logFile, 'utf-8')
+      const lines = content.split('\n').filter((l) => l.trim() !== '')
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(lines[i]) as { timestamp?: unknown }
+          if (typeof parsed.timestamp === 'number') {
+            lastEntryAt = parsed.timestamp
+            break
+          }
+        } catch {
+          // skip malformed
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return {
+    enabled: true,
+    command: alerts.command,
+    throttleSec: alerts.throttleSec,
+    timeoutSec: alerts.timeoutSec,
+    logFile: alerts.logFile,
+    logExists,
+    lastEntryAt,
+    triggers: alerts.triggers,
   }
 }
 
@@ -323,6 +385,36 @@ function printHuman(r: StatusReport): void {
       const when = new Date(e.lastTimestamp).toISOString()
       const who = e.chatName ? `${e.chatName} (${e.chatId})` : e.chatId
       console.log(`  Last:     ${when} — ${who}, ${e.messageCount} msg`)
+    }
+  }
+
+  console.log('')
+  console.log('Alerts (operator notifications on service issues):')
+  if (!r.alerts.enabled) {
+    console.log('  Mode: disabled (no alerts.command configured)')
+    console.log('  Note: service issues like session conflict, logged-out, or extended')
+    console.log('        disconnect will only surface in logs. Configure alerts.command')
+    console.log('        in ~/.whatsapp-monitor/config.json to get notified.')
+  } else {
+    const a = r.alerts
+    console.log(`  Command:       ${a.command}`)
+    console.log(`  Throttle:      ${a.throttleSec}s (per-kind)`)
+    console.log(`  Timeout:       ${a.timeoutSec === 0 ? 'disabled' : a.timeoutSec + 's'}`)
+    const triggers: string[] = []
+    if (a.triggers.conflict) triggers.push('conflict')
+    if (a.triggers.loggedOut) triggers.push('loggedOut')
+    if (a.triggers.extendedDisconnectAfterSec !== null)
+      triggers.push(`extendedDisconnect(${a.triggers.extendedDisconnectAfterSec}s)`)
+    if (a.triggers.dispatchFailuresAfter !== null)
+      triggers.push(`dispatchFailures(${a.triggers.dispatchFailuresAfter} consecutive)`)
+    console.log(`  Triggers:      [${triggers.join(', ')}]`)
+    console.log(`  Log file:      ${a.logFile}`)
+    if (a.logExists && a.lastEntryAt) {
+      console.log(`  Last alert:    ${new Date(a.lastEntryAt).toISOString()}`)
+    } else if (a.logExists) {
+      console.log('  Last alert:    (log exists but no parseable entries)')
+    } else {
+      console.log('  Last alert:    (none — log does not exist yet)')
     }
   }
 

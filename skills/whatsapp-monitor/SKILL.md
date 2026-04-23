@@ -309,6 +309,54 @@ Exit code 0 means every step passed. Non-zero means at least one step failed —
 
 **What `notify test` proves:** monitor-side payload generation, JSONL log append, and child process spawn + exit. It does **not** verify end-to-end alert delivery — whether the agent then called its Telegram tool, whether Telegram delivered the message, etc. For full verification you need a real message through `run` (Step 5).
 
+### Step 4.5 — Configure operator alerts (recommended)
+
+**What this is:** a separate pipeline from `notify`. `notify` forwards incoming WhatsApp messages to the agent as content. **Alerts** notify the operator (you/your agent) about **problems with the service itself**: the WhatsApp session hitting a stream conflict (440), being logged out, staying disconnected for an extended period, or the `notify.command` failing repeatedly. Without this configured, those problems only show up in logs — you'd never know until you notice messages have stopped arriving.
+
+Ask the user:
+
+> "Do you want to be notified if the monitor itself runs into trouble? The common cases are: another device takes over the WhatsApp Web session, the session gets logged out, the service stays disconnected for more than ~10 minutes, or the agent pipeline keeps failing. **I recommend sending these alerts to the same agent as your notifications** — it already has context about the setup and can message you (via Telegram, Slack, whatever). It uses a separate session so service alerts don't pollute your message-notification session."
+
+If the user agrees, add an `alerts` block to `~/.whatsapp-monitor/config.json`:
+
+```json
+{
+  "allowedGroups": ["..."],
+  "allowedContacts": ["..."],
+  "authDir": "...",
+  "notify": { ... },
+  "alerts": {
+    "command": "openclaw agent --agent <AGENT_ID> --session-id wa-monitor-alerts --message \"whatsapp-monitor service alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool you have that reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log and the user will not see it. Kind: $WAM_ALERT_KIND. Details: $WAM_ALERT_MESSAGE\"",
+    "throttleSec": 900,
+    "timeoutSec": 60
+  }
+}
+```
+
+Substitute `<AGENT_ID>` with whatever the user picked for `notify.agent` in Step 4 — same agent, different session id. All four triggers default to on when `alerts.command` is set.
+
+**Why the long prefix in `--message`.** An agent configured for the main notify session is likely trained to "decide whether the user cares about this batch" and often silently drop noise. A service alert framed like a message batch might get dropped the same way. The preamble tells the agent explicitly that this is a *health* event, not content, and that it must actively call a messaging tool rather than reply. If the user is confident their agent's general memory already covers this (e.g. "in any session containing the string 'service alert' reach me on Telegram immediately"), they can simplify to a shorter `--message`.
+
+**Field reference:**
+
+- **`alerts.command`** — shell command run via `sh -c` for every alert fire. Receives the full alert JSON on stdin; also gets `WAM_ALERT_KIND`, `WAM_ALERT_MESSAGE`, `WAM_ALERT_TIMESTAMP` env vars for shell-conditional use.
+- **`alerts.throttleSec`** (default `900` = 15 min) — per-kind throttle. The same kind of alert won't fire twice within this window. Different kinds (e.g. `conflict` then `loggedOut`) are independent.
+- **`alerts.timeoutSec`** (default `60`) — max time the child command can run. SIGTERM, 2s grace, SIGKILL.
+- **`alerts.logFile`** (default `~/.whatsapp-monitor/alerts.jsonl`) — every fire attempt is appended here, whether or not the child was invoked (throttled alerts are logged but not sent). Durable record for postmortems.
+- **`alerts.on`** — per-trigger switches. All default to on when the command is set. To disable one: `"conflict": false`. To change extended-disconnect threshold: `"extendedDisconnect": { "afterSec": 300 }`. To change dispatch-failures threshold: `"dispatchFailures": { "afterConsecutive": 3 }`.
+
+**Briefing the agent further (optional).** The preamble in `--message` above is usually enough. If the user wants belt-and-suspenders, add a short note to the agent's general memory (not the monitor's behavior.md — that one is for message-content decisions): "Any turn in session `wa-monitor-alerts` is a service-health alert. Relay it to me via my Telegram tool immediately." This helps if the preamble ever gets shortened.
+
+Verify the wiring:
+
+```bash
+whatsapp-monitor alerts test
+```
+
+This fires a synthetic alert through the pipeline (bypassing throttle). A healthy result is `[result] ok` and the user getting a test notification in whatever channel the agent is configured to use.
+
+**Crash detection is separate.** In-process alerts can't detect the service process crashing — by definition there's no one to send from. For that you need an external watchdog. See [External watchdog](#external-watchdog-for-crash-detection) below.
+
 ### Step 5 — Run the service under a process manager
 
 `whatsapp-monitor run` is a foreground process. If the user runs it in a shell, it dies when the shell closes. **Always** walk them through a process manager.
@@ -376,7 +424,7 @@ Final sanity check:
 whatsapp-monitor status
 ```
 
-Expect `Status: ✓ ready and running` with a live `pid` under `Processes:`. If not, the listed blockers name what's missing.
+Expect `Status: ✓ ready and connected` with a live `pid` under `Processes:` and `State: ✓ connected` under `Live connection:`. If the final line is `Status: ✓ ready and running (connecting)` or `(disconnected)`, wait a few seconds and re-run — those are transient reconnect states. Anything else (`✗ session conflict`, `✗ logged out`, `✗ not ready`) names the blocker; see Troubleshooting.
 
 Onboarding is complete.
 
@@ -409,7 +457,8 @@ Fires one synthetic payload through the configured notifier (`notify.command` or
 
 | Command | Purpose |
 |---|---|
-| `whatsapp-monitor status [--json]` | One-shot readiness check: linked, allowlist, notify config, live `run` process, last dispatched notification. Exits non-zero if not ready. |
+| `whatsapp-monitor status [--json]` | One-shot readiness check: linked, allowlist, notify config, alerts config, live `run` process + its live connection state (connected / connecting / disconnected / conflict / logged_out), last dispatched notification, last fired alert. Exits non-zero if not ready or if the live state is `conflict` / `logged_out`. |
+| `whatsapp-monitor alerts test` | Fire a synthetic alert through `alerts.command` (throttle bypassed). Verify the operator-alert pipeline. |
 | `whatsapp-monitor link [--qr\|--code --phone <num>] [--name <str>] [--reset]` | Link WhatsApp account |
 | `whatsapp-monitor groups [--json]` | List groups with their IDs |
 | `whatsapp-monitor config list` | Show current allowlist and notify config |
@@ -470,6 +519,29 @@ Setting both `command` and `kind` is a config error — the loader rejects it wi
 | `notify.timeoutSec` | `120` | Hard cap on child process runtime. SIGTERM then 2s grace then SIGKILL. `0` disables. |
 | `notify.logFile` | `~/.whatsapp-monitor/notifications.jsonl` | Where each payload is appended regardless of command outcome. |
 | `notify.maxBufferedPerChat` | `50` | Safety cap; forces a flush if reached. |
+| `alerts.command` | _(none)_ | Shell command invoked via `sh -c` when a service issue fires. Receives alert JSON on stdin and `WAM_ALERT_KIND` / `WAM_ALERT_MESSAGE` / `WAM_ALERT_TIMESTAMP` env vars. Setting this enables alerts; leaving it unset disables the pipeline entirely. |
+| `alerts.throttleSec` | `900` | Per-kind throttle window (seconds). Same-kind alerts within this window append to the log but don't run the shell command. |
+| `alerts.timeoutSec` | `60` | Hard cap on child runtime. SIGTERM → 2s grace → SIGKILL. `0` disables. |
+| `alerts.logFile` | `~/.whatsapp-monitor/alerts.jsonl` | Every fire attempt (fired or throttled) is appended here. |
+| `alerts.on.conflict` | `true` | Fire on WhatsApp stream conflict (status 440). |
+| `alerts.on.loggedOut` | `true` | Fire when WhatsApp reports the session is logged out. |
+| `alerts.on.extendedDisconnect` | `{ afterSec: 600 }` | Fire when the monitor has been in a non-connected state for this many seconds. Set to `false` to disable. |
+| `alerts.on.dispatchFailures` | `{ afterConsecutive: 5 }` | Fire after this many consecutive `notify` dispatch failures (spawn error / non-zero exit / timeout). Resets on the first successful dispatch. Set to `false` to disable. |
+
+### Alert payload shape
+
+```jsonc
+{
+  "kind": "conflict",           // one of: conflict, loggedOut, extendedDisconnect, dispatchFailures, test
+  "message": "WhatsApp Web stream conflict (status 440): another linked device has taken over…",
+  "timestamp": 1713300000000,
+  "details": {                  // kind-specific fields
+    "reconnectAttempts": 3
+  }
+}
+```
+
+Written to the child's stdin as one line of JSON. The env vars `WAM_ALERT_KIND`, `WAM_ALERT_MESSAGE`, `WAM_ALERT_TIMESTAMP` let shell commands use simple conditionals without parsing JSON.
 
 ### Notification payload shape
 
@@ -706,6 +778,39 @@ systemctl --user status whatsapp-monitor   # verify
 journalctl --user -u whatsapp-monitor -f   # logs
 ```
 
+### External watchdog (for crash detection)
+
+The in-process alerts pipeline (Step 4.5) covers `conflict`, `loggedOut`, `extendedDisconnect`, and `dispatchFailures`. It **cannot** cover a process crash — a killed or OOM'd `run` process can't send its own alert. For that, run a short cron job / systemd timer that polls `whatsapp-monitor status --json` and fires `alerts.command` itself when the service is down.
+
+Only set this up if Step 4.5 is done — the watchdog reuses the same `alerts.command`.
+
+**cron (every 5 min):**
+
+```bash
+crontab -e
+```
+
+Add:
+
+```
+*/5 * * * * /usr/local/bin/whatsapp-monitor status --json 2>/dev/null | /usr/bin/jq -e '.runProcesses | length > 0' >/dev/null || openclaw agent --agent <AGENT_ID> --session-id wa-monitor-alerts --message "whatsapp-monitor service alert — this is a health signal for the monitor itself, NOT an incoming WhatsApp message. Please notify the user RIGHT NOW via whatever messaging tool reaches them (Telegram / Slack / etc.). Your text reply in this session only goes to a log. Kind: crash. Details: whatsapp-monitor run process is not alive on host $(hostname)."
+```
+
+Adjust the `whatsapp-monitor` and `jq` paths per `which whatsapp-monitor` / `which jq`, and substitute `<AGENT_ID>`.
+
+**systemd user timer (Linux):** if cron isn't preferred, use a `OnUnitActiveSec=5min` timer firing a small oneshot service running the same check. Same logic.
+
+**Simpler version** if you don't care about the exact alert format and just want *something* to notice:
+
+```
+*/5 * * * * /usr/local/bin/whatsapp-monitor status >/dev/null || mail -s "whatsapp-monitor down" you@example.com
+```
+
+Two notes:
+
+- Set the watchdog to the **same `<AGENT_ID>` and session id** as the in-process alerts so the agent sees both kinds in one session. Avoids the agent being confused by split context.
+- The watchdog adds coverage, it doesn't replace the in-process alerts — the two catch different failure modes. Run both.
+
 ---
 
 ## Troubleshooting
@@ -718,7 +823,63 @@ Before diving into any specific symptom below, run:
 whatsapp-monitor status
 ```
 
-It reports auth state, allowlist counts, the resolved notify block, the notification log (size, entry count, last entry), and whether a `run` process is currently alive. If the output says `✗ not ready`, the listed blockers are the exact things to fix (e.g. "not linked", "allowlist is empty", "behaviorFile missing"). If it says `✓ ready and running` but messages still aren't flowing, the issue is almost certainly downstream — the notifier child, the agent, or the agent's messaging tool. Skip ahead to the relevant section below.
+It reports auth state, allowlist counts, the resolved notify block, the notification log (size, entry count, last entry), whether a `run` process is currently alive, and — if `run` is up — its **live connection state** (connected / connecting / disconnected / conflict / logged_out) plus uptime, idle time, and reconnect-attempt count.
+
+Interpret the final status line:
+
+- **`✓ ready and connected`** — fully healthy. If messages still aren't flowing, the issue is downstream (the notifier child, the agent, or the agent's messaging tool). Skip ahead to the relevant section below.
+- **`✓ ready and running (<state>)`** — the service is up but the socket isn't connected (e.g. `connecting`, `disconnected`). Brief transient states during reconnect are fine; if it's stuck in `disconnected` for more than a minute, check `tail -f /tmp/whatsapp-monitor.err.log` (macOS) or `journalctl --user -u whatsapp-monitor -f` (Linux) for the disconnect reason.
+- **`✗ session conflict (440)`** — another WhatsApp Web device has taken over the slot. See the dedicated section below.
+- **`✗ logged out`** — the WhatsApp session was invalidated. Re-link with `whatsapp-monitor link`.
+- **`✗ not ready`** — config-level blockers (not linked, empty allowlist, bad notify config). The listed blockers are the exact things to fix.
+
+### Session conflict — `status` reports `✗ session conflict (440)`
+
+Symptoms: `whatsapp-monitor status` shows `State: ✗ session conflict (440 — another WhatsApp Web device took over)`, and the service log shows `connection closed: reason=streamConflict(440) ... willReconnect=false` followed by `not reconnecting: session conflict (status 440)`. The service is still running (doesn't crash) but has stopped reconnecting. If the `alerts` pipeline is configured (Step 4.5), the agent should have pinged the user about it already.
+
+What it means: WhatsApp's server allows only one live connection per linked-device slot. Another process using the same credentials claimed the slot, so the server kicked this connection. Retrying would just rotate who holds the slot — the cause must be resolved first.
+
+**The usual cause is a second `whatsapp-monitor run` that shouldn't exist.** Check:
+
+```bash
+ps aux | grep whatsapp-monitor   # look for a second `run` process
+```
+
+If there's a stray one (e.g. launchd started one and a leftover shell session is running another), kill it. Then restart the service:
+
+```bash
+# macOS
+launchctl unload ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+launchctl load ~/Library/LaunchAgents/com.whatsapp-monitor.run.plist
+# Linux
+systemctl --user restart whatsapp-monitor
+```
+
+If no second process exists locally, the conflict is coming from somewhere else — check the phone (WhatsApp → Settings → Linked Devices) for an active entry representing a copy of this auth dir running elsewhere (another machine, a container, an old `scp`-ed copy of `~/.whatsapp-monitor/auth/`). Stop that instance, then restart here.
+
+**What conflict is NOT:** the user's iOS/desktop apps. Those are separate linked-device slots and don't conflict with `whatsapp-monitor`. Conflict only happens when two processes share the same credentials. Don't advise the user to close their desktop app.
+
+If you can't find a second process anywhere and the conflict persists, last resort: `whatsapp-monitor reset` to wipe auth, then re-link and restart.
+
+### `run` refuses to start — "Another `whatsapp-monitor run` is already running"
+
+Symptoms: starting `run` (directly or via launchd/systemd) fails immediately with:
+
+> `Another \`whatsapp-monitor run\` is already running (pid NNNN). If you believe it's stuck, kill it first: kill NNNN. Lock file: ~/.whatsapp-monitor/run.lock`
+
+This is the single-instance guard working as intended. It prevents two `run` processes from producing a 440 conflict loop (see above).
+
+Check what's there:
+
+```bash
+ps -p <NNNN>   # is the PID actually alive?
+```
+
+- **If alive and legitimate** (e.g. the service manager already started it): you don't need to do anything. `status` will confirm it's running.
+- **If alive but unexpected** (stale shell session, debugging leftover): `kill NNNN`, then retry.
+- **If the PID is dead** (the error shouldn't appear in that case — the lock is auto-cleaned for stale PIDs — but if a filesystem glitch leaves it behind): `rm ~/.whatsapp-monitor/run.lock` and retry.
+
+Never force-remove the lock while the named PID is alive and is actually `whatsapp-monitor run` — you'd get back to the 440 loop.
 
 ### Version mismatch — installed `whatsapp-monitor` is behind npm `latest`
 

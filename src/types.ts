@@ -12,6 +12,47 @@ export interface NotifyConfig {
   maxBufferedPerChat?: number
 }
 
+export type AlertKind =
+  | 'conflict'
+  | 'loggedOut'
+  | 'extendedDisconnect'
+  | 'dispatchFailures'
+  | 'test'
+
+export interface AlertsConfig {
+  command?: string
+  throttleSec?: number
+  timeoutSec?: number
+  logFile?: string
+  on?: {
+    conflict?: boolean
+    loggedOut?: boolean
+    extendedDisconnect?: { afterSec?: number } | boolean
+    dispatchFailures?: { afterConsecutive?: number } | boolean
+  }
+}
+
+export interface ResolvedAlerts {
+  enabled: boolean
+  command: string
+  throttleSec: number
+  timeoutSec: number
+  logFile: string
+  triggers: {
+    conflict: boolean
+    loggedOut: boolean
+    extendedDisconnectAfterSec: number | null
+    dispatchFailuresAfter: number | null
+  }
+}
+
+export interface AlertPayload {
+  kind: AlertKind
+  message: string
+  timestamp: number
+  details?: Record<string, unknown>
+}
+
 export interface ResolvedNotifyBase {
   quietPeriodSec: number
   timeoutSec: number
@@ -42,6 +83,7 @@ export interface MonitorConfig {
   allowedContacts: string[]
   authDir: string
   notify?: NotifyConfig
+  alerts?: AlertsConfig
 }
 
 export interface NotificationPayload {

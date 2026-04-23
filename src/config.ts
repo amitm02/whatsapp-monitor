@@ -2,17 +2,28 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname, isAbsolute } from 'path'
-import type { MonitorConfig, NotifyConfig, ResolvedNotify } from './types.js'
+import type {
+  AlertsConfig,
+  MonitorConfig,
+  NotifyConfig,
+  ResolvedAlerts,
+  ResolvedNotify,
+} from './types.js'
 
 const CONFIG_DIR = join(homedir(), '.whatsapp-monitor')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const DEFAULT_AUTH_DIR = join(CONFIG_DIR, 'auth')
 const DEFAULT_NOTIFY_LOG = join(CONFIG_DIR, 'notifications.jsonl')
+const DEFAULT_ALERTS_LOG = join(CONFIG_DIR, 'alerts.jsonl')
 const DEFAULT_BEHAVIOR_FILE = join(CONFIG_DIR, 'behavior.md')
 const DEFAULT_QUIET_PERIOD_SEC = 30
 const DEFAULT_TIMEOUT_SEC = 120
 const DEFAULT_MAX_BUFFERED_PER_CHAT = 50
 const DEFAULT_SESSION_ID_TEMPLATE = 'wa-monitor-{date}'
+const DEFAULT_ALERTS_THROTTLE_SEC = 15 * 60
+const DEFAULT_ALERTS_TIMEOUT_SEC = 60
+const DEFAULT_EXTENDED_DISCONNECT_SEC = 10 * 60
+const DEFAULT_DISPATCH_FAILURES_AFTER = 5
 
 const DEFAULT_CONFIG: MonitorConfig = {
   allowedGroups: [],
@@ -104,6 +115,82 @@ export function resolveNotify(notify: NotifyConfig | undefined): ResolvedNotify 
   return { ...base, mode: 'disabled' }
 }
 
+function normalizeAlerts(input: unknown): AlertsConfig | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const raw = input as Record<string, unknown>
+  const alerts: AlertsConfig = {}
+
+  if (typeof raw.command === 'string' && raw.command.trim() !== '') {
+    alerts.command = raw.command
+  }
+  if (typeof raw.throttleSec === 'number' && raw.throttleSec >= 0) {
+    alerts.throttleSec = raw.throttleSec
+  }
+  if (typeof raw.timeoutSec === 'number' && raw.timeoutSec >= 0) {
+    alerts.timeoutSec = raw.timeoutSec
+  }
+  if (typeof raw.logFile === 'string' && raw.logFile.trim() !== '') {
+    alerts.logFile = raw.logFile
+  }
+  if (raw.on && typeof raw.on === 'object') {
+    const on = raw.on as Record<string, unknown>
+    alerts.on = {}
+    if (typeof on.conflict === 'boolean') alerts.on.conflict = on.conflict
+    if (typeof on.loggedOut === 'boolean') alerts.on.loggedOut = on.loggedOut
+    if (typeof on.extendedDisconnect === 'boolean') {
+      alerts.on.extendedDisconnect = on.extendedDisconnect
+    } else if (on.extendedDisconnect && typeof on.extendedDisconnect === 'object') {
+      const ext = on.extendedDisconnect as { afterSec?: unknown }
+      if (typeof ext.afterSec === 'number' && ext.afterSec > 0) {
+        alerts.on.extendedDisconnect = { afterSec: ext.afterSec }
+      }
+    }
+    if (typeof on.dispatchFailures === 'boolean') {
+      alerts.on.dispatchFailures = on.dispatchFailures
+    } else if (on.dispatchFailures && typeof on.dispatchFailures === 'object') {
+      const df = on.dispatchFailures as { afterConsecutive?: unknown }
+      if (typeof df.afterConsecutive === 'number' && df.afterConsecutive > 0) {
+        alerts.on.dispatchFailures = { afterConsecutive: df.afterConsecutive }
+      }
+    }
+  }
+
+  return Object.keys(alerts).length > 0 ? alerts : undefined
+}
+
+export function resolveAlerts(alerts: AlertsConfig | undefined): ResolvedAlerts {
+  const command = alerts?.command ?? ''
+  const enabled = command.length > 0
+  const on = alerts?.on ?? {}
+  const extractExtended = (): number | null => {
+    const v = on.extendedDisconnect
+    if (v === false) return null
+    if (v === true || v === undefined) return enabled ? DEFAULT_EXTENDED_DISCONNECT_SEC : null
+    return v.afterSec ?? DEFAULT_EXTENDED_DISCONNECT_SEC
+  }
+  const extractDispatchFailures = (): number | null => {
+    const v = on.dispatchFailures
+    if (v === false) return null
+    if (v === true || v === undefined) return enabled ? DEFAULT_DISPATCH_FAILURES_AFTER : null
+    return v.afterConsecutive ?? DEFAULT_DISPATCH_FAILURES_AFTER
+  }
+  return {
+    enabled,
+    command,
+    throttleSec: alerts?.throttleSec ?? DEFAULT_ALERTS_THROTTLE_SEC,
+    timeoutSec: alerts?.timeoutSec ?? DEFAULT_ALERTS_TIMEOUT_SEC,
+    logFile: resolvePath(alerts?.logFile ?? DEFAULT_ALERTS_LOG, CONFIG_DIR),
+    triggers: {
+      // Default to on for conflict/loggedOut when alerts are enabled;
+      // these are the high-value signals operators almost always want.
+      conflict: enabled && on.conflict !== false,
+      loggedOut: enabled && on.loggedOut !== false,
+      extendedDisconnectAfterSec: enabled ? extractExtended() : null,
+      dispatchFailuresAfter: enabled ? extractDispatchFailures() : null,
+    },
+  }
+}
+
 export async function loadConfig(): Promise<MonitorConfig> {
   if (!existsSync(CONFIG_FILE)) {
     return { ...DEFAULT_CONFIG }
@@ -120,6 +207,7 @@ export async function loadConfig(): Promise<MonitorConfig> {
     allowedContacts: parsed.allowedContacts ?? [],
     authDir: parsed.authDir ?? DEFAULT_AUTH_DIR,
     notify: normalizeNotify(parsed.notify),
+    alerts: normalizeAlerts(parsed.alerts),
   }
 }
 
